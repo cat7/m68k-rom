@@ -29,6 +29,7 @@
 #include "migration/vmstate.h"
 #include "hw/core/irq.h"
 #include "hw/scsi/esp.h"
+#include "system/block-backend.h"
 #include "trace.h"
 #include "qemu/log.h"
 #include "qemu/module.h"
@@ -376,6 +377,15 @@ static void handle_satn(ESPState *s)
 
     esp_set_phase(s, STAT_MO);
 
+    if (s->dma && fifo8_is_empty(&s->fifo)) {
+        /*
+         * Selected, now in message out phase waiting for the message byte
+         * (the Quadra 700 ROM's SCSISelAtn polls the sequence step here and
+         * then writes the byte to the FIFO register)
+         */
+        s->rregs[ESP_RSEQ] = SEQ_MO;
+    }
+
     if (s->dma) {
         esp_do_dma(s);
     } else {
@@ -475,7 +485,8 @@ static bool esp_cdb_ready(ESPState *s)
 
     cdblen = scsi_cdb_length((uint8_t *)&pbuf[s->cmdfifo_cdb_offset]);
 
-    return cdblen < 0 ? false : (len >= cdblen);
+    /* the message bytes in front of the CDB don't count */
+    return cdblen < 0 ? false : (len - s->cmdfifo_cdb_offset >= cdblen);
 }
 
 static void esp_dma_ti_check(ESPState *s)
@@ -783,7 +794,11 @@ static void esp_do_nodma(ESPState *s)
     case STAT_MO:
         switch (s->rregs[ESP_CMD]) {
         case CMD_SELATN:
-            /* Copy FIFO into cmdfifo */
+        case CMD_SELATN | CMD_DMA:
+            /*
+             * Copy FIFO into cmdfifo (for the DMA variant: message byte
+             * written to the FIFO register instead of by DMA)
+             */
             len = esp_fifo_pop_buf(s, buf, fifo8_num_used(&s->fifo));
             len = MIN(fifo8_num_free(&s->cmdfifo), len);
             fifo8_push_all(&s->cmdfifo, buf, len);
@@ -1119,8 +1134,9 @@ void esp_hard_reset(ESPState *s)
 
 static void esp_soft_reset(ESPState *s)
 {
-    qemu_irq_lower(s->irq);
-    qemu_irq_lower(s->drq_irq);
+    /* go through the helpers so irq_state/drq_state stay in sync */
+    esp_lower_irq(s);
+    esp_lower_drq(s);
     esp_hard_reset(s);
 }
 
@@ -1502,6 +1518,35 @@ static const MemoryRegionOps sysbus_esp_mem_ops = {
     .valid.accepts = esp_mem_accepts,
 };
 
+/*
+ * Pseudo DMA has no handshake on some Macs (the Quadra 700 ROM moves data
+ * with blind loops): the real chip holds the bus cycle until it can
+ * accept or deliver the byte. Model that: when a PDMA access would find
+ * the FIFO empty (read) or full (write) because the current SCSI buffer is
+ * used up, fetch/flush the next buffer synchronously.
+ */
+static void esp_pdma_stall(ESPState *s, bool write)
+{
+    uint8_t phase = esp_get_phase(s);
+
+    if (!s->current_req || !s->current_dev || s->async_len ||
+        !esp_get_tc(s)) {
+        return;
+    }
+    if (write ? (phase == STAT_DO && fifo8_is_full(&s->fifo))
+              : (phase == STAT_DI && fifo8_is_empty(&s->fifo))) {
+        if (!s->current_req->aiocb) {
+            /* no disk I/O in flight yet: ask for the next buffer */
+            scsi_req_continue(s->current_req);
+        }
+        blk_drain(s->current_dev->conf.blk);
+        if (write) {
+            /* move the FIFO into the new buffer */
+            esp_do_dma(s);
+        }
+    }
+}
+
 static void sysbus_esp_pdma_write(void *opaque, hwaddr addr,
                                   uint64_t val, unsigned int size)
 {
@@ -1512,10 +1557,13 @@ static void sysbus_esp_pdma_write(void *opaque, hwaddr addr,
 
     switch (size) {
     case 1:
+        esp_pdma_stall(s, true);
         esp_pdma_write(s, val);
         break;
     case 2:
+        esp_pdma_stall(s, true);
         esp_pdma_write(s, val >> 8);
+        esp_pdma_stall(s, true);
         esp_pdma_write(s, val);
         break;
     }
@@ -1533,10 +1581,13 @@ static uint64_t sysbus_esp_pdma_read(void *opaque, hwaddr addr,
 
     switch (size) {
     case 1:
+        esp_pdma_stall(s, false);
         val = esp_pdma_read(s);
         break;
     case 2:
+        esp_pdma_stall(s, false);
         val = esp_pdma_read(s);
+        esp_pdma_stall(s, false);
         val = (val << 8) | esp_pdma_read(s);
         break;
     }
@@ -1621,6 +1672,8 @@ static void sysbus_esp_hard_reset(DeviceState *dev)
     SysBusESPState *sysbus = SYSBUS_ESP(dev);
     ESPState *s = ESP(&sysbus->esp);
 
+    esp_lower_irq(s);
+    esp_lower_drq(s);
     esp_hard_reset(s);
 }
 

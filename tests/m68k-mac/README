@@ -1,0 +1,14 @@
+Local test tools for the q700/q800 work (not upstream QEMU tests).
+
+  pdma_test.py   QEMU DISK SOCK  read 300 blocks through the q700 pseudo-DMA
+                                 window with blind 16-bit reads (crosses the
+                                 128 KiB SCSI buffer boundary) and compare
+  pdma_wtest.py  QEMU DISK SOCK  same for writes, then read back
+  satn_test.py   QEMU DISK SOCK  Select with ATN + DMA as the Quadra 700 ROM's
+                                 SCSISelAtn does it
+  macmon.py                      drive a running guest through the HMP monitor
+                                 (mouse via the Mouse low memory global, keys,
+                                 screendumps)
+
+DISK should be a raw image with random data; it is opened with snapshot=on.
+Example: python3 pdma_test.py build/qemu-system-m68k rand.img /tmp/q700qt.sock
