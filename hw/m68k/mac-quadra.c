@@ -348,6 +348,8 @@ static void q800_machine_init(MachineState *machine)
     object_initialize_child(OBJECT(machine), "via1", &m->via1,
                             TYPE_MOS6522_Q800_VIA1);
     qdev_prop_set_uint8(DEVICE(&m->via1), "cpuid", model->via1_cpuid);
+    qdev_prop_set_uint8(DEVICE(&m->via1), "porta-pullup",
+                        model->via1_porta_pullup);
     dinfo = drive_get(IF_MTD, 0, 0);
     if (dinfo) {
         qdev_prop_set_drive(DEVICE(&m->via1), "drive",
@@ -488,10 +490,24 @@ static void q800_machine_init(MachineState *machine)
                        qemu_irq_invert(
                            qdev_get_gpio_in(DEVICE(&m->via2),
                                                    VIA2_IRQ_SCSI_BIT)));
-    sysbus_connect_irq(sysbus, 1,
-                       qemu_irq_invert(
-                           qdev_get_gpio_in(DEVICE(&m->via2),
+    if (model->scsi_drq_dafb) {
+        /* DRQ goes to VIA2 and to the DAFB (wired up with the video) */
+        object_initialize_child(OBJECT(machine), "scsi-drq-split",
+                                &m->scsi_drq_split, TYPE_SPLIT_IRQ);
+        qdev_prop_set_uint32(DEVICE(&m->scsi_drq_split), "num-lines", 2);
+        qdev_realize(DEVICE(&m->scsi_drq_split), NULL, &error_fatal);
+        qdev_connect_gpio_out(DEVICE(&m->scsi_drq_split), 0,
+                              qemu_irq_invert(
+                                  qdev_get_gpio_in(DEVICE(&m->via2),
                                                    VIA2_IRQ_SCSI_DATA_BIT)));
+        sysbus_connect_irq(sysbus, 1,
+                           qdev_get_gpio_in(DEVICE(&m->scsi_drq_split), 0));
+    } else {
+        sysbus_connect_irq(sysbus, 1,
+                           qemu_irq_invert(
+                               qdev_get_gpio_in(DEVICE(&m->via2),
+                                                       VIA2_IRQ_SCSI_DATA_BIT)));
+    }
     memory_region_add_subregion(&m->macio, model->esp_base - IO_BASE,
                                 sysbus_mmio_get_region(sysbus, 0));
     memory_region_add_subregion(&m->macio, model->esp_pdma - IO_BASE,
@@ -577,6 +593,11 @@ static void q800_machine_init(MachineState *machine)
     qdev_realize(dev, BUS(nubus), &error_fatal);
 
     macfb_mode = (NUBUS_MACFB(dev)->macfb).mode;
+
+    if (model->scsi_drq_dafb) {
+        qdev_connect_gpio_out(DEVICE(&m->scsi_drq_split), 1,
+                              qdev_get_gpio_in_named(dev, "scsi-drq", 0));
+    }
 
     cs = CPU(&m->cpu);
     if (linux_boot) {

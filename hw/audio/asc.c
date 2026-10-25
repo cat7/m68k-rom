@@ -483,6 +483,16 @@ static void asc_write(void *opaque, hwaddr addr, uint64_t value,
             asc_lower_irq(s);
         }
         break;
+    case ASC_FIFOIRQ:
+        /*
+         * The original ASC lets the IRQ status bits be written (the ROM
+         * power-on test reads them back); reading clears them as usual.
+         */
+        if (s->type == ASC_TYPE_ASC) {
+            s->fifos[0].int_status = value & 0x3;
+            s->fifos[1].int_status = (value >> 2) & 0x3;
+        }
+        break;
     case ASC_WAVECTRL:
         break;
     case ASC_VOLUME:

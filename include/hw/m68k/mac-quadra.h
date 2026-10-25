@@ -32,6 +32,7 @@
 #include "hw/net/dp8393x.h"
 #include "hw/char/escc.h"
 #include "hw/core/or-irq.h"
+#include "hw/core/split-irq.h"
 #include "hw/scsi/esp.h"
 #include "hw/block/swim.h"
 #include "hw/nubus/mac-nubus-bridge.h"
@@ -57,9 +58,11 @@ typedef struct MacQuadraModel {
     const char *rom_filename;     /* default for -bios */
     uint32_t bootinfo_model;      /* Gestalt ID passed to Linux */
     uint8_t via1_cpuid;           /* ID bits on VIA1 port A */
+    uint8_t via1_porta_pullup;    /* VIA1 port A inputs that read as 1 */
     MacMemCtrl memctrl;
     bool has_machine_id_reg;      /* ID longword at 0x5ffffffc */
     bool default_easc;
+    bool scsi_drq_dafb;           /* SCSI DRQ also readable in DAFB */
     hwaddr esp_base;
     hwaddr esp_pdma;
     uint32_t nubus_slots;         /* NuBus slot-available-mask */
@@ -86,6 +89,7 @@ struct MacQuadraMachineState {
     MemoryRegion dp8393x_prom;
     ESCCState escc;
     OrIRQState escc_orgate;
+    SplitIRQ scsi_drq_split;
     SysBusESPState esp;
     Swim swim;
     MacNubusBridge mac_nubus_bridge;

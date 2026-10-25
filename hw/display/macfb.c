@@ -33,6 +33,8 @@
 #define DAFB_MODE_CTRL1     0x8
 #define DAFB_MODE_CTRL2     0xc
 #define DAFB_MODE_SENSE     0x1c
+#define DAFB_SCSI_CTRL      0x24    /* Turbo SCSI (Quadra 700/900/950) */
+#define DAFB_SCSI_DRQ       0x200
 #define DAFB_INTR_MASK      0x104
 #define DAFB_INTR_STAT      0x108
 #define DAFB_INTR_CLEAR     0x10c
@@ -576,6 +578,11 @@ static void macfb_ctrl_write(void *opaque,
     case DAFB_MODE_SENSE:
         macfb_sense_write(s, val);
         break;
+    case DAFB_SCSI_CTRL:
+        /* the DRQ bit is an input from the SCSI chip */
+        s->regs[addr >> 2] = (val & ~DAFB_SCSI_DRQ) |
+                             (s->regs[addr >> 2] & DAFB_SCSI_DRQ);
+        break;
     case DAFB_INTR_MASK:
         s->regs[addr >> 2] = val;
         if (val & DAFB_INTR_VBL) {
@@ -717,6 +724,15 @@ static void macfb_nubus_set_irq(void *opaque, int n, int level)
     nubus_set_irq(nd, level);
 }
 
+/* SCSI DRQ from the 53C96, readable in the DAFB Turbo SCSI register */
+static void macfb_nubus_scsi_drq(void *opaque, int n, int level)
+{
+    MacfbNubusState *s = NUBUS_MACFB(opaque);
+    uint32_t *reg = &s->macfb.regs[DAFB_SCSI_CTRL >> 2];
+
+    *reg = level ? *reg | DAFB_SCSI_DRQ : *reg & ~DAFB_SCSI_DRQ;
+}
+
 static void macfb_nubus_realize(DeviceState *dev, Error **errp)
 {
     ERRP_GUARD();
@@ -738,6 +754,7 @@ static void macfb_nubus_realize(DeviceState *dev, Error **errp)
     memory_region_add_subregion(&nd->slot_mem, VIDEO_BASE, &ms->mem_vram);
 
     ms->irq = qemu_allocate_irq(macfb_nubus_set_irq, s, 0);
+    qdev_init_gpio_in_named(dev, macfb_nubus_scsi_drq, "scsi-drq", 1);
 }
 
 static void macfb_nubus_unrealize(DeviceState *dev)

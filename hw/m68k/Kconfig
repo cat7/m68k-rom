@@ -30,6 +30,7 @@ config MAC_QUADRA
     select ESP
     select DP8393X
     select OR_IRQ
+    select SPLIT_IRQ
     select ASC
 
 config Q800

@@ -395,6 +395,11 @@ static void handle_s_without_atn(ESPState *s)
     }
 
     esp_set_phase(s, STAT_CD);
+    /*
+     * The target is selected and in command phase: the sequence step shows
+     * this while the chip waits for the CDB (the Quadra 700 ROM polls it).
+     */
+    s->rregs[ESP_RSEQ] = SEQ_CD;
     s->cmdfifo_cdb_offset = 0;
 
     if (s->dma) {

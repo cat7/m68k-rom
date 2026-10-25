@@ -55,6 +55,8 @@ struct MOS6522Q800VIA1State {
 
     /* Machine ID bits returned on port A (VIA1A_CPUID_MASK) */
     uint8_t cpuid;
+    /* Port A input pins pulled high on the board */
+    uint8_t porta_pullup;
 
     /* RTC */
     uint8_t PRAM[256];

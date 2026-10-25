@@ -24,9 +24,12 @@ static const MacQuadraModel q700_model = {
     .rom_filename = "Quadra700.rom",
     .bootinfo_model = MAC_MODEL_Q700,
     .via1_cpuid = VIA1A_CPUID3,
+    /* PA0 low at power-on makes the ROM enter its factory test mode */
+    .via1_porta_pullup = 0x01,
     .memctrl = MAC_MEMCTRL_ORWELL,
     .has_machine_id_reg = false,
     .default_easc = false,
+    .scsi_drq_dafb = true,
     .esp_base = MAC_QUADRA_IO_BASE + 0x0f000,
     .esp_pdma = MAC_QUADRA_IO_BASE + 0x0f100,
     /* slot 0x9 is the in-built framebuffer; slot numbering to be verified */

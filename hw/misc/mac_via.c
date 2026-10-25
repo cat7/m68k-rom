@@ -1036,6 +1036,8 @@ static uint64_t mos6522_q800_via1_read(void *opaque, hwaddr addr, unsigned size)
     case VIA_REG_ANH:
         /* Machine ID bits, set by the board */
         ret = (ret & ~VIA1A_CPUID_MASK) | (s->cpuid & VIA1A_CPUID_MASK);
+        /* Inputs pulled high on the board */
+        ret |= s->porta_pullup & ~ms->dira;
         break;
     case VIA_REG_T2CH:
         if (s->timer_hack_state == 6) {
@@ -1318,6 +1320,7 @@ static const VMStateDescription vmstate_q800_via1 = {
 static const Property mos6522_q800_via1_properties[] = {
     DEFINE_PROP_DRIVE("drive", MOS6522Q800VIA1State, blk),
     DEFINE_PROP_UINT8("cpuid", MOS6522Q800VIA1State, cpuid, VIA1A_CPUID_Q800),
+    DEFINE_PROP_UINT8("porta-pullup", MOS6522Q800VIA1State, porta_pullup, 0),
 };
 
 static void mos6522_q800_via1_class_init(ObjectClass *oc, const void *data)

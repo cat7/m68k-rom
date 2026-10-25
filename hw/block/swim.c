@@ -363,6 +363,18 @@ static uint64_t iwmctrl_read(void *opaque, hwaddr addr, unsigned size)
     case IWM_READALLONES:
         value = 0xff;
         break;
+    case IWM_READSTATUS0:
+    case IWM_READSTATUS1:
+        /*
+         * Status: bits 4-0 mirror the mode register, bit 5 is set while
+         * the drive is enabled (motor on), bit 7 is the drive sense line,
+         * which reads high with no drive attached.
+         */
+        value = (swimctrl->iwmregs[IWM_WRITESETMODE] & 0x1f) | 0x80;
+        if (swimctrl->iwm_latches & (1 << IWMLB_MOTORON)) {
+            value |= 0x20;
+        }
+        break;
     default:
         value = 0;
         break;
@@ -383,7 +395,11 @@ static void ismctrl_write(void *opaque, hwaddr reg, uint64_t value,
 {
     SWIMCtrl *swimctrl = opaque;
 
-    reg >>= REG_SHIFT;
+    /*
+     * Writes ignore the read/write select bit: the Quadra 700 ROM floppy
+     * driver sets mode bits by writing to the rHandshake address.
+     */
+    reg = (reg >> REG_SHIFT) & 7;
 
     trace_swim_ismctrl_write(reg, ism_reg_names[reg], size, value);
 
@@ -412,13 +428,25 @@ static void ismctrl_write(void *opaque, hwaddr reg, uint64_t value,
         swimctrl->swim_mode |= value;
         break;
     case SWIM_WRITE_PARAMETER:
+        /*
+         * Inferred from the Quadra 700 ROM power-on test (not from chip
+         * documentation): bit 1 of parameter 14 only sticks when bit 1 of
+         * parameter 13 is set. The test writes 0xdd, 0xee to parameters
+         * 13, 14 and expects 0xec back, yet expects any other value
+         * written to all parameters to read back unchanged.
+         */
+        if (swimctrl->pram_idx == 14 && !(swimctrl->pram[13] & 0x02)) {
+            value &= ~0x02;
+        }
         swimctrl->pram[swimctrl->pram_idx++] = value;
         swimctrl->pram_idx &= 0xf;
+        break;
+    case SWIM_WRITE_SETUP:
+        swimctrl->ismregs[SWIM_WRITE_SETUP] = value;
         break;
     case SWIM_WRITE_DATA:
     case SWIM_WRITE_MARK:
     case SWIM_WRITE_CRC:
-    case SWIM_WRITE_SETUP:
         break;
     }
 }
@@ -445,15 +473,18 @@ static uint64_t ismctrl_read(void *opaque, hwaddr reg, unsigned size)
         swimctrl->pram_idx &= 0xf;
         break;
     case SWIM_READ_STATUS:
-        value = swimctrl->swim_status & ~(1 << SWIM_MODE_STATUS_BIT);
-        if (swimctrl->swim_mode == SWIM_MODE_ISM) {
+        /* The status register reads back the mode register */
+        value = swimctrl->swim_mode & ~(1 << SWIM_MODE_STATUS_BIT);
+        if (swimctrl->mode == SWIM_MODE_ISM) {
             value |= (1 << SWIM_MODE_STATUS_BIT);
         }
+        break;
+    case SWIM_READ_SETUP:
+        value = swimctrl->ismregs[SWIM_WRITE_SETUP];
         break;
     case SWIM_READ_DATA:
     case SWIM_READ_MARK:
     case SWIM_READ_ERROR:
-    case SWIM_READ_SETUP:
         break;
     }
 
