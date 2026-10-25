@@ -120,10 +120,10 @@ static const MacFbMode macfb_mode_table[] = {
 
     /*
      * Quadra 700 DAFB: CTRL2 bits 11-8 are 0x6 rather than 0x7 and the
-     * frame buffer layout differs (read from the ROM's ScreenRow and
-     * ScrnBase low memory globals).
+     * frame buffer layout differs (read from the ROM's ScreenRow,
+     * ScrnBase and main GDevice gdRect low memory globals).
      */
-    { MACFB_DISPLAY_VGA, 1, 0x100, 0x61e, 640, 480, 0x240, 0xe00 },
+    { MACFB_DISPLAY_APPLE_21_COLOR, 1, 0x100, 0x61e, 1152, 870, 0x240, 0xe00 },
 };
 
 typedef void macfb_draw_line_func(MacfbState *s, uint8_t *d, uint32_t addr,
