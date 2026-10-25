@@ -26,6 +26,7 @@
 #include "hw/input/adb.h"
 #include "migration/vmstate.h"
 #include "qemu/module.h"
+#include "qemu/bitmap.h"
 #include "standard-headers/linux/input-event-codes.h"
 #include "ui/input.h"
 #include "hw/input/adb-keys.h"
@@ -43,6 +44,8 @@ struct KBDState {
     QemuInputHandlerState *hs;
     uint8_t data[128];
     int rptr, wptr, count;
+    /* Keys held down, by ADB keycode */
+    DECLARE_BITMAP(pressed, 128);
 };
 
 
@@ -321,7 +324,16 @@ static void adb_keyboard_event(DeviceState *dev, QemuConsole *src,
         trace_adb_device_kbd_no_key();
         return;
     }
-    if (evt->key.down == false) { /* if key release event */
+    /*
+     * An ADB keyboard does not repeat: Mac OS repeats a held key itself.
+     * Drop the host's autorepeat presses, or every repeat is a new key.
+     */
+    if (evt->key.down) {
+        if (test_and_set_bit(keycode, s->pressed)) {
+            return;
+        }
+    } else {
+        clear_bit(keycode, s->pressed);
         keycode = keycode | 0x80;   /* create keyboard break code */
     }
 
@@ -353,6 +365,7 @@ static void adb_kbd_reset(DeviceState *dev)
     s->rptr = 0;
     s->wptr = 0;
     s->count = 0;
+    bitmap_zero(s->pressed, 128);
 }
 
 static const QemuInputHandler adb_keyboard_handler = {

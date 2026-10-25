@@ -23,10 +23,12 @@
  */
 
 #include "qemu/osdep.h"
+#include "qapi/error.h"
 #include "ui/console.h"
 #include "hw/input/adb.h"
 #include "migration/vmstate.h"
 #include "qemu/module.h"
+#include "hw/core/qdev-properties.h"
 #include "adb-internal.h"
 #include "trace.h"
 #include "qom/object.h"
@@ -41,6 +43,10 @@ struct MouseState {
     QemuInputHandlerState *hs;
     int buttons_state, last_buttons_state;
     int dx, dy, dz;
+    /* Host motion still to be scaled, in 1/100 of a guest pixel */
+    int fx, fy;
+    /* Percentage of host motion passed to the guest */
+    uint32_t speed;
 };
 
 
@@ -66,10 +72,18 @@ static void adb_mouse_handle_event(DeviceState *dev, QemuConsole *src,
 
     switch (evt->type) {
     case INPUT_EVENT_KIND_REL:
+        /*
+         * The host has already accelerated this motion and Mac OS
+         * accelerates it again, so scale it down by the speed setting.
+         */
         if (evt->rel.axis == INPUT_AXIS_X) {
-            s->dx += evt->rel.value;
+            s->fx += evt->rel.value * (int)s->speed;
+            s->dx += s->fx / 100;
+            s->fx %= 100;
         } else if (evt->rel.axis == INPUT_AXIS_Y) {
-            s->dy += evt->rel.value;
+            s->fy += evt->rel.value * (int)s->speed;
+            s->dy += s->fy / 100;
+            s->fy %= 100;
         }
         break;
 
@@ -248,7 +262,12 @@ static void adb_mouse_reset(DeviceState *dev)
     d->devaddr = ADB_DEVID_MOUSE;
     s->last_buttons_state = s->buttons_state = 0;
     s->dx = s->dy = s->dz = 0;
+    s->fx = s->fy = 0;
 }
+
+static const Property adb_mouse_properties[] = {
+    DEFINE_PROP_UINT32("speed", MouseState, speed, 50),
+};
 
 static const VMStateDescription vmstate_adb_mouse = {
     .name = "adb_mouse",
@@ -271,6 +290,10 @@ static void adb_mouse_realizefn(DeviceState *dev, Error **errp)
     MouseState *s = ADB_MOUSE(dev);
     ADBMouseClass *amc = ADB_MOUSE_GET_CLASS(dev);
 
+    if (s->speed < 1 || s->speed > 400) {
+        error_setg(errp, "adb-mouse speed must be 1 to 400 (percent)");
+        return;
+    }
     amc->parent_realize(dev, errp);
 
     s->hs = qemu_input_handler_register(dev, &adb_mouse_handler);
@@ -297,6 +320,7 @@ static void adb_mouse_class_init(ObjectClass *oc, const void *data)
     adc->devhasdata = adb_mouse_has_data;
     device_class_set_legacy_reset(dc, adb_mouse_reset);
     dc->vmsd = &vmstate_adb_mouse;
+    device_class_set_props(dc, adb_mouse_properties);
 }
 
 static const TypeInfo adb_mouse_type_info = {
