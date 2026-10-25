@@ -26,7 +26,6 @@
 #define DAFB_BASE  0x00800000
 
 #define MACFB_PAGE_SIZE 4096
-#define MACFB_VRAM_SIZE (4 * MiB)
 
 #define DAFB_MODE_VADDR1    0x0
 #define DAFB_MODE_VADDR2    0x4
@@ -36,6 +35,7 @@
 #define DAFB_SCSI_CTRL      0x24    /* Turbo SCSI (Quadra 700/900/950) */
 #define DAFB_SCSI_DRQ       0x200
 #define DAFB_INTR_MASK      0x104
+#define DAFB_CONFIG         0x120   /* bits 4,5 read as board strapping */
 #define DAFB_INTR_STAT      0x108
 #define DAFB_INTR_CLEAR     0x10c
 #define DAFB_LUT_INDEX      0x200
@@ -384,7 +384,7 @@ static void macfb_invalidate_display(void *opaque)
 {
     MacfbState *s = opaque;
 
-    memory_region_set_dirty(&s->mem_vram, 0, MACFB_VRAM_SIZE);
+    memory_region_set_dirty(&s->mem_vram, 0, s->vram_size);
 }
 
 static uint32_t macfb_sense_read(MacfbState *s)
@@ -563,7 +563,7 @@ static void macfb_reset(MacfbState *s)
         s->color_palette[i * 3 + 1] = 255 - i;
         s->color_palette[i * 3 + 2] = 255 - i;
     }
-    memset(s->vram, 0, MACFB_VRAM_SIZE);
+    memset(s->vram, 0, s->vram_size);
     /*
      * Sense lines are released at power-on; the Quadra 700 ROM reads the
      * monitor sense code before writing this register.
@@ -598,6 +598,9 @@ static uint64_t macfb_ctrl_read(void *opaque,
     default:
         if (addr < MACFB_CTRL_TOPADDR) {
             val = s->regs[addr >> 2];
+            if ((addr & ~3) == DAFB_CONFIG) {
+                val |= s->config_strap;
+            }
             if (size < 4) {
                 /*
                  * Narrow reads return the addressed part of the big endian
@@ -765,11 +768,17 @@ static bool macfb_common_realize(DeviceState *dev, MacfbState *s, Error **errp)
     memory_region_init_io(&s->mem_ctrl, OBJECT(dev), &macfb_ctrl_ops, s,
                           "macfb-ctrl", 0x1000);
 
+    if (!is_power_of_2(s->vram_size) || s->vram_size < 512 * KiB ||
+        s->vram_size > MACFB_VRAM_WINDOW) {
+        error_setg(errp, "vram-size must be a power of 2 from 512 KiB "
+                   "to 4 MiB");
+        return false;
+    }
     memory_region_init_ram(&s->mem_vram, OBJECT(dev), "macfb-vram",
-                           MACFB_VRAM_SIZE, &error_abort);
+                           s->vram_size, &error_abort);
     memory_region_set_log(&s->mem_vram, true, DIRTY_MEMORY_VGA);
     s->vram = memory_region_get_ram_ptr(&s->mem_vram);
-    s->vram_bit_mask = MACFB_VRAM_SIZE - 1;
+    s->vram_bit_mask = s->vram_size - 1;
 
     s->vbl_timer = timer_new_ns(QEMU_CLOCK_VIRTUAL, macfb_vbl_timer, s);
     macfb_update_mode(s);
@@ -828,6 +837,17 @@ static void macfb_nubus_realize(DeviceState *dev, Error **errp)
     memory_region_add_subregion(&nd->slot_mem, DAFB_BASE, &ms->mem_ctrl);
     memory_region_add_subregion(&nd->slot_mem, VIDEO_BASE, &ms->mem_vram);
 
+    /* smaller VRAM repeats through its window, as the driver's sizing expects */
+    for (int i = 1; i * ms->vram_size < MACFB_VRAM_WINDOW &&
+                    i <= ARRAY_SIZE(ms->mem_vram_mirror); i++) {
+        memory_region_init_alias(&ms->mem_vram_mirror[i - 1], OBJECT(dev),
+                                 "macfb-vram-mirror", &ms->mem_vram, 0,
+                                 ms->vram_size);
+        memory_region_add_subregion(&nd->slot_mem,
+                                    VIDEO_BASE + i * ms->vram_size,
+                                    &ms->mem_vram_mirror[i - 1]);
+    }
+
     ms->irq = qemu_allocate_irq(macfb_nubus_set_irq, s, 0);
     qdev_init_gpio_in_named(dev, macfb_nubus_scsi_drq, "scsi-drq", 1);
 }
@@ -856,6 +876,8 @@ static void macfb_nubus_reset(DeviceState *d)
 }
 
 static const Property macfb_sysbus_properties[] = {
+    DEFINE_PROP_UINT32("vram-size", MacfbSysBusState, macfb.vram_size,
+                       MACFB_VRAM_WINDOW),
     DEFINE_PROP_UINT32("width", MacfbSysBusState, macfb.width, 640),
     DEFINE_PROP_UINT32("height", MacfbSysBusState, macfb.height, 480),
     DEFINE_PROP_UINT8("depth", MacfbSysBusState, macfb.depth, 8),
@@ -874,6 +896,9 @@ static const VMStateDescription vmstate_macfb_sysbus = {
 };
 
 static const Property macfb_nubus_properties[] = {
+    DEFINE_PROP_UINT32("vram-size", MacfbNubusState, macfb.vram_size,
+                       MACFB_VRAM_WINDOW),
+    DEFINE_PROP_UINT32("config-strap", MacfbNubusState, macfb.config_strap, 0),
     DEFINE_PROP_UINT32("width", MacfbNubusState, macfb.width, 640),
     DEFINE_PROP_UINT32("height", MacfbNubusState, macfb.height, 480),
     DEFINE_PROP_UINT8("depth", MacfbNubusState, macfb.depth, 8),

@@ -67,6 +67,10 @@ typedef struct MacQuadraModel {
     MacMemCtrl memctrl;
     MacFloppyCtrl floppy;
     bool has_machine_id_reg;      /* ID longword at 0x5ffffffc */
+    uint32_t machine_id;          /* its value (0: Quadra 800's) */
+    bool no_sonic;                /* no on-board Ethernet */
+    bool cuda;                    /* ADB, RTC and PRAM behind Cuda */
+    bool rom_mirror;              /* ROM repeats every 1 MiB up to 0x50000000 */
     bool default_easc;
     bool scsi_drq_dafb;           /* SCSI DRQ also readable in DAFB */
     hwaddr esp_base;
@@ -76,6 +80,7 @@ typedef struct MacQuadraModel {
     /* screen when no -g is given (0: 800x600x8) */
     uint32_t fb_width, fb_height;
     uint8_t fb_depth;
+    uint32_t vram_size;           /* on-board VRAM (0: 4 MiB) */
 } MacQuadraModel;
 
 struct MacQuadraMachineClass {
@@ -91,6 +96,7 @@ struct MacQuadraMachineState {
     M68kCPU cpu;
     MemoryRegion rom;
     MemoryRegion rom_alias;
+    MemoryRegion rom_mirror[16];
     GLUEState glue;
     MOS6522Q800VIA1State via1;
     MOS6522Q800VIA2State via2;
@@ -120,6 +126,8 @@ OBJECT_DECLARE_TYPE(MacQuadraMachineState, MacQuadraMachineClass,
 
 #define TYPE_Q800_MACHINE MACHINE_TYPE_NAME("q800")
 #define TYPE_Q700_MACHINE MACHINE_TYPE_NAME("q700")
+#define TYPE_Q900_MACHINE MACHINE_TYPE_NAME("q900")
+#define TYPE_LC475_MACHINE MACHINE_TYPE_NAME("lc475")
 
 /* Base of the on-board I/O area (VIAs, SCC, SCSI, ...) */
 #define MAC_QUADRA_IO_BASE    0x50000000

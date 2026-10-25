@@ -11,7 +11,7 @@
 #include "hw/core/sysbus.h"
 
 #define DJMEMC_SIZE        0x2000
-#define DJMEMC_NUM_REGS    (0x38 / sizeof(uint32_t))
+#define DJMEMC_NUM_REGS    (0x80 / sizeof(uint32_t))
 
 #define DJMEMC_MAXBANKS    10
 

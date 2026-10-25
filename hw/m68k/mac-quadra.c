@@ -200,7 +200,9 @@ static const MemoryRegionOps macio_alias_ops = {
 
 static uint64_t machine_id_read(void *opaque, hwaddr addr, unsigned size)
 {
-    return Q800_MACHINE_ID;
+    const MacQuadraModel *model = opaque;
+
+    return model->machine_id ?: Q800_MACHINE_ID;
 }
 
 static void machine_id_write(void *opaque, hwaddr addr, uint64_t val,
@@ -213,6 +215,11 @@ static const MemoryRegionOps machine_id_ops = {
     .write = machine_id_write,
     .endianness = DEVICE_BIG_ENDIAN,
     .valid = {
+        /* the LC 475 ROM also reads it as a word */
+        .min_access_size = 1,
+        .max_access_size = 4,
+    },
+    .impl = {
         .min_access_size = 4,
         .max_access_size = 4,
     },
@@ -238,6 +245,66 @@ static const MemoryRegionOps ramio_ops = {
     },
 };
 
+/* MACSONIC on-board Ethernet */
+static void mac_quadra_init_sonic(MacQuadraMachineState *m)
+{
+    DeviceState *dev;
+    SysBusDevice *sysbus;
+    NICInfo *nd;
+    MACAddr mac;
+    uint8_t *prom;
+    int i, checksum;
+
+    /*
+     * MacSonic driver needs an Apple MAC address
+     * Valid prefix are:
+     * 00:05:02 Apple
+     * 00:80:19 Dayna Communications, Inc.
+     * 00:A0:40 Apple
+     * 08:00:07 Apple
+     * (Q800 use the last one)
+     */
+    object_initialize_child(OBJECT(m), "dp8393x", &m->dp8393x,
+                            TYPE_DP8393X);
+    dev = DEVICE(&m->dp8393x);
+    nd = qemu_find_nic_info(TYPE_DP8393X, true, "dp83932");
+    if (nd) {
+        qdev_set_nic_properties(dev, nd);
+        memcpy(mac.a, nd->macaddr.a, sizeof(mac.a));
+    } else {
+        qemu_macaddr_default_if_unset(&mac);
+    }
+    mac.a[0] = 0x08;
+    mac.a[1] = 0x00;
+    mac.a[2] = 0x07;
+    qdev_prop_set_macaddr(dev, "mac", mac.a);
+
+    qdev_prop_set_uint8(dev, "it_shift", 2);
+    qdev_prop_set_bit(dev, "big_endian", true);
+    object_property_set_link(OBJECT(dev), "dma_mr",
+                             OBJECT(get_system_memory()), &error_abort);
+    sysbus = SYS_BUS_DEVICE(dev);
+    sysbus_realize(sysbus, &error_fatal);
+    memory_region_add_subregion(&m->macio, SONIC_BASE - IO_BASE,
+                                sysbus_mmio_get_region(sysbus, 0));
+    sysbus_connect_irq(sysbus, 0,
+                       qdev_get_gpio_in(DEVICE(&m->glue), GLUE_IRQ_IN_SONIC));
+
+    memory_region_init_rom(&m->dp8393x_prom, NULL, "dp8393x-q800.prom",
+                           SONIC_PROM_SIZE, &error_fatal);
+    memory_region_add_subregion(get_system_memory(), SONIC_PROM_BASE,
+                                &m->dp8393x_prom);
+
+    /* Add MAC address with valid checksum to PROM */
+    prom = memory_region_get_ram_ptr(&m->dp8393x_prom);
+    checksum = 0;
+    for (i = 0; i < 6; i++) {
+        prom[i] = revbit8(mac.a[i]);
+        checksum ^= prom[i];
+    }
+    prom[7] = 0xff - checksum;
+}
+
 static void q800_machine_init(MachineState *machine)
 {
     MacQuadraMachineState *m = MAC_QUADRA_MACHINE(machine);
@@ -249,8 +316,7 @@ static void q800_machine_init(MachineState *machine)
     int bios_size;
     ram_addr_t initrd_base;
     int32_t initrd_size;
-    uint8_t *prom;
-    int i, checksum;
+    int i;
     const MacFbMode *macfb_mode;
     ram_addr_t ram_size = machine->ram_size;
     const char *kernel_filename = machine->kernel_filename;
@@ -266,8 +332,6 @@ static void q800_machine_init(MachineState *machine)
     BusState *adb_bus;
     NubusBus *nubus;
     DriveInfo *dinfo;
-    NICInfo *nd;
-    MACAddr mac;
     uint8_t rng_seed[32];
 
     linux_boot = (kernel_filename != NULL);
@@ -307,8 +371,8 @@ static void q800_machine_init(MachineState *machine)
                                 &m->macio_alias);
 
     if (model->has_machine_id_reg) {
-        memory_region_init_io(&m->machine_id, NULL, &machine_id_ops, NULL,
-                              "Machine ID", 4);
+        memory_region_init_io(&m->machine_id, NULL, &machine_id_ops,
+                              (void *)model, "Machine ID", 4);
         memory_region_add_subregion(get_system_memory(), 0x5ffffffc,
                                     &m->machine_id);
     }
@@ -354,6 +418,7 @@ static void q800_machine_init(MachineState *machine)
     qdev_prop_set_uint8(DEVICE(&m->via1), "cpuid", model->via1_cpuid);
     qdev_prop_set_uint8(DEVICE(&m->via1), "porta-pullup",
                         model->via1_porta_pullup);
+    qdev_prop_set_bit(DEVICE(&m->via1), "cuda", model->cuda);
     dinfo = drive_get(IF_MTD, 0, 0);
     if (dinfo) {
         qdev_prop_set_drive(DEVICE(&m->via1), "drive",
@@ -386,56 +451,9 @@ static void q800_machine_init(MachineState *machine)
     sysbus_connect_irq(sysbus, 0,
                        qdev_get_gpio_in(DEVICE(&m->glue), GLUE_IRQ_IN_VIA2));
 
-    /* MACSONIC */
-
-    /*
-     * MacSonic driver needs an Apple MAC address
-     * Valid prefix are:
-     * 00:05:02 Apple
-     * 00:80:19 Dayna Communications, Inc.
-     * 00:A0:40 Apple
-     * 08:00:07 Apple
-     * (Q800 use the last one)
-     */
-    object_initialize_child(OBJECT(machine), "dp8393x", &m->dp8393x,
-                            TYPE_DP8393X);
-    dev = DEVICE(&m->dp8393x);
-    nd = qemu_find_nic_info(TYPE_DP8393X, true, "dp83932");
-    if (nd) {
-        qdev_set_nic_properties(dev, nd);
-        memcpy(mac.a, nd->macaddr.a, sizeof(mac.a));
-    } else {
-        qemu_macaddr_default_if_unset(&mac);
+    if (!model->no_sonic) {
+        mac_quadra_init_sonic(m);
     }
-    mac.a[0] = 0x08;
-    mac.a[1] = 0x00;
-    mac.a[2] = 0x07;
-    qdev_prop_set_macaddr(dev, "mac", mac.a);
-
-    qdev_prop_set_uint8(dev, "it_shift", 2);
-    qdev_prop_set_bit(dev, "big_endian", true);
-    object_property_set_link(OBJECT(dev), "dma_mr",
-                             OBJECT(get_system_memory()), &error_abort);
-    sysbus = SYS_BUS_DEVICE(dev);
-    sysbus_realize(sysbus, &error_fatal);
-    memory_region_add_subregion(&m->macio, SONIC_BASE - IO_BASE,
-                                sysbus_mmio_get_region(sysbus, 0));
-    sysbus_connect_irq(sysbus, 0,
-                       qdev_get_gpio_in(DEVICE(&m->glue), GLUE_IRQ_IN_SONIC));
-
-    memory_region_init_rom(&m->dp8393x_prom, NULL, "dp8393x-q800.prom",
-                           SONIC_PROM_SIZE, &error_fatal);
-    memory_region_add_subregion(get_system_memory(), SONIC_PROM_BASE,
-                                &m->dp8393x_prom);
-
-    /* Add MAC address with valid checksum to PROM */
-    prom = memory_region_get_ram_ptr(&m->dp8393x_prom);
-    checksum = 0;
-    for (i = 0; i < 6; i++) {
-        prom[i] = revbit8(mac.a[i]);
-        checksum ^= prom[i];
-    }
-    prom[7] = 0xff - checksum;
 
     /* SCC */
 
@@ -602,6 +620,9 @@ static void q800_machine_init(MachineState *machine)
                          graphic_height ?: (model->fb_height ?: 600));
     qdev_prop_set_uint8(dev, "depth",
                         graphic_depth ?: (model->fb_depth ?: 8));
+    if (model->vram_size) {
+        qdev_prop_set_uint32(dev, "vram-size", model->vram_size);
+    }
     qdev_realize(dev, BUS(nubus), &error_fatal);
 
     macfb_mode = (NUBUS_MACFB(dev)->macfb).mode;
@@ -704,6 +725,25 @@ static void q800_machine_init(MachineState *machine)
                                  &m->rom, 0, MACROM_SIZE);
         memory_region_add_subregion(get_system_memory(), 0x40000000,
                                     &m->rom_alias);
+
+        if (model->rom_mirror) {
+            /*
+             * The ROM is only partially decoded: reads beyond its end
+             * (the Slot Manager walks past it) see it again.
+             */
+            for (i = 0; i < ARRAY_SIZE(m->rom_mirror); i++) {
+                hwaddr base = 0x40000000 + i * MACROM_SIZE;
+
+                if (base == 0x40000000 || base == MACROM_ADDR) {
+                    continue;
+                }
+                memory_region_init_alias(&m->rom_mirror[i], NULL,
+                                         "m68k_mac.rom-mirror", &m->rom, 0,
+                                         MACROM_SIZE);
+                memory_region_add_subregion(get_system_memory(), base,
+                                            &m->rom_mirror[i]);
+            }
+        }
 
         /* Load MacROM binary */
         if (filename) {

@@ -92,6 +92,25 @@ struct MOS6522Q800VIA1State {
 
     /* SETUPTIMEK hack */
     int timer_hack_state;
+
+    /*
+     * Cuda (LC 475, Quadra 605 and later): ADB, RTC and PRAM sit behind a
+     * microcontroller talking to the VIA shift register, with TIP, TACK
+     * and TREQ on port B instead of the ADB state and RTC lines.
+     */
+    bool cuda;
+    QEMUTimer *cuda_sr_timer;
+    int64_t cuda_sr_due;          /* pending SR interrupt time, 0: none */
+    int cuda_sr_reads;            /* VIA reads left before it is raised */
+    uint8_t cuda_last_b;
+    int cuda_in_size;
+    int cuda_in_index;
+    int cuda_out_index;
+    uint8_t cuda_in[300];
+    uint8_t cuda_out[64];
+    uint8_t cuda_one_sec_mode;
+    bool cuda_time_sent;
+    uint8_t cuda_mem[0x100];     /* 68HC05 page 0 (registers, RAM) */
 };
 
 

@@ -52,8 +52,13 @@ typedef struct MacFbMode {
 #define MACFB_CTRL_TOPADDR  0x200
 #define MACFB_NUM_REGS      (MACFB_CTRL_TOPADDR / sizeof(uint32_t))
 
+#define MACFB_VRAM_WINDOW   (4 * MiB)
+
 typedef struct MacfbState {
     MemoryRegion mem_vram;
+    MemoryRegion mem_vram_mirror[3];
+    uint32_t vram_size;
+    uint32_t config_strap;        /* read-only bits in register 0x120 */
     MemoryRegion mem_ctrl;
     QemuConsole *con;
 

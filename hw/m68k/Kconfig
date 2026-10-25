@@ -48,6 +48,14 @@ config Q700
     select MAC_QUADRA
     select ORWELL
 
+config LC475
+    bool
+    default y
+    depends on M68K
+    select MAC_QUADRA
+    select DJMEMC
+    select IOSB
+
 config M68K_VIRT
     bool
     default y

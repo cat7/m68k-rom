@@ -29,22 +29,37 @@
 #define DJMEMC_MEMTOP           0x2c
 #define DJMEMC_CONFIG           0x30
 #define DJMEMC_REFRESH          0x34
+/*
+ * MEMCjr (LC 475, Quadra 605): the ROM keeps the upper bits of each value
+ * it writes to the other registers here first and reads them back later.
+ */
+#define DJMEMC_MEMCJR_LATCH     0x7c
 
 
-static uint64_t djmemc_read(void *opaque, hwaddr addr, unsigned size)
+static bool djmemc_reg_valid(hwaddr reg)
 {
-    DJMEMCState *s = opaque;
-    uint64_t val = 0;
-
-    switch (addr) {
+    switch (reg) {
     case DJMEMC_INTERLEAVECONF:
     case DJMEMC_BANK0CONF ... DJMEMC_BANK9CONF:
     case DJMEMC_MEMTOP:
     case DJMEMC_CONFIG:
     case DJMEMC_REFRESH:
-        val = s->regs[addr >> 2];
-        break;
-    default:
+    case DJMEMC_MEMCJR_LATCH:
+        return true;
+    }
+    return false;
+}
+
+static uint64_t djmemc_read(void *opaque, hwaddr addr, unsigned size)
+{
+    DJMEMCState *s = opaque;
+    hwaddr reg = addr & ~3;
+    uint64_t val = 0;
+
+    if (djmemc_reg_valid(reg)) {
+        val = extract32(s->regs[reg >> 2], (4 - size - (addr & 3)) * 8,
+                        size * 8);
+    } else {
         qemu_log_mask(LOG_UNIMP, "djMEMC: unimplemented read addr=0x%"PRIx64
                                  " val=0x%"PRIx64 " size=%d\n",
                                  addr, val, size);
@@ -58,18 +73,15 @@ static void djmemc_write(void *opaque, hwaddr addr, uint64_t val,
                          unsigned size)
 {
     DJMEMCState *s = opaque;
+    hwaddr reg = addr & ~3;
 
     trace_djmemc_write(addr, val, size);
 
-    switch (addr) {
-    case DJMEMC_INTERLEAVECONF:
-    case DJMEMC_BANK0CONF ... DJMEMC_BANK9CONF:
-    case DJMEMC_MEMTOP:
-    case DJMEMC_CONFIG:
-    case DJMEMC_REFRESH:
-        s->regs[addr >> 2] = val;
-        break;
-    default:
+    if (djmemc_reg_valid(reg)) {
+        s->regs[reg >> 2] = deposit32(s->regs[reg >> 2],
+                                      (4 - size - (addr & 3)) * 8,
+                                      size * 8, val);
+    } else {
         qemu_log_mask(LOG_UNIMP, "djMEMC: unimplemented write addr=0x%"PRIx64
                                  " val=0x%"PRIx64 " size=%d\n",
                                  addr, val, size);
@@ -80,7 +92,11 @@ static const MemoryRegionOps djmemc_mmio_ops = {
     .read = djmemc_read,
     .write = djmemc_write,
     .impl = {
-        .min_access_size = 4,
+        .min_access_size = 1,
+        .max_access_size = 4,
+    },
+    .valid = {
+        .min_access_size = 1,
         .max_access_size = 4,
     },
     .endianness = DEVICE_BIG_ENDIAN,
@@ -105,8 +121,8 @@ static void djmemc_reset_hold(Object *obj, ResetType type)
 
 static const VMStateDescription vmstate_djmemc = {
     .name = "djMEMC",
-    .version_id = 1,
-    .minimum_version_id = 1,
+    .version_id = 2,
+    .minimum_version_id = 2,
     .fields = (const VMStateField[]) {
         VMSTATE_UINT32_ARRAY(regs, DJMEMCState, DJMEMC_NUM_REGS),
         VMSTATE_END_OF_LIST()

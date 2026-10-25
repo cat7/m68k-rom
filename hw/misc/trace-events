@@ -389,6 +389,8 @@ via1_adb_poll(uint8_t data, const char *vadbint, int status, int index, int size
 via1_adb_netbsd_enum_hack(void) "using NetBSD enum hack"
 via1_auxmode(int mode) "setting auxmode to %d"
 via1_timer_hack_state(int state) "setting timer_hack_state to %d"
+via1_cuda_receive(int len, int type, int cmd, int arg0, int arg1) "len=%d type=0x%02x cmd=0x%02x args=0x%02x 0x%02x"
+via1_cuda_send(int len, int type, int flags, int cmd) "len=%d type=0x%02x flags=0x%02x cmd=0x%02x"
 
 # grlib_ahb_apb_pnp.c
 grlib_ahb_pnp_read(uint64_t addr, unsigned size, uint32_t value) "AHB PnP read addr:0x%03"PRIx64" size:%u data:0x%08x"

@@ -24,6 +24,7 @@
 #include "hw/misc/mac_via.h"
 #include "hw/misc/mos6522.h"
 #include "hw/input/adb.h"
+#include "hw/misc/macio/cuda.h"
 #include "system/runstate.h"
 #include "qapi/error.h"
 #include "qemu/cutils.h"
@@ -302,6 +303,8 @@ enum {
     REG_EMPTY = 0xff,
 };
 
+static void via1_cuda_tick(MOS6522Q800VIA1State *v1s);
+
 static void via1_sixty_hz_update(MOS6522Q800VIA1State *v1s)
 {
     /* 60 Hz irq */
@@ -341,6 +344,9 @@ static void via1_one_second(void *opaque)
     qemu_irq_lower(irq);
     qemu_irq_raise(irq);
 
+    if (v1s->cuda) {
+        via1_cuda_tick(v1s);
+    }
     via1_one_second_update(v1s);
 }
 
@@ -887,7 +893,9 @@ static void via1_auxmode_update(MOS6522Q800VIA1State *v1s)
          * "A/UX" interrupt mode after it initialises, so we can use this as
          * a convenient place to clear the ADB interrupt for now.
          */
-        s->b |= VIA1B_vADBInt;
+        if (!v1s->cuda) {
+            s->b |= VIA1B_vADBInt;
+        }
     }
 }
 
@@ -1035,6 +1043,397 @@ static void via1_timer_calibration_hack(MOS6522Q800VIA1State *v1s, int addr,
     }
 }
 
+/*
+ * Cuda
+ *
+ * On the LC 475, Quadra 605 and later 68040 Macs ADB, the real-time clock
+ * and parameter RAM are handled by Cuda, a 68HC05 microcontroller wired to
+ * the VIA1 shift register. Port B carries the handshake:
+ *
+ *   PB5  TIP   (out) low while a transaction is in progress
+ *   PB4  TACK  (out) toggled by the host after each byte
+ *   PB3  TREQ  (in)  low when Cuda has a packet for the host; raised
+ *                    together with the last byte of a packet
+ *
+ * Cuda clocks every byte through the shift register and signals each one
+ * with an SR interrupt. A host packet starts with its type (0: ADB, 1:
+ * Cuda command), replies start with type, flags and the command byte.
+ * This is a behavioural model; the protocol follows QEMU's PowerMac Cuda.
+ */
+
+#define CUDA_TREQ           0x08
+#define CUDA_TACK           0x10
+#define CUDA_TIP            0x20
+
+#define CUDA_ADB_PACKET     0
+#define CUDA_PSEUDO_PACKET  1
+#define CUDA_ERROR_PACKET   2
+#define CUDA_TICK_PACKET    3
+
+#define CUDA_SR_DELAY_NS    200000
+#define CUDA_SR_DELAY_READS 2
+
+static void via1_cuda_sr_int(void *opaque)
+{
+    MOS6522Q800VIA1State *v1s = opaque;
+
+    v1s->cuda_sr_due = 0;
+    qemu_irq_raise(v1s->adb_data_ready);
+}
+
+static void via1_cuda_delay_sr_int(MOS6522Q800VIA1State *v1s)
+{
+    v1s->cuda_sr_due = qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL) +
+                       CUDA_SR_DELAY_NS;
+    v1s->cuda_sr_reads = CUDA_SR_DELAY_READS;
+    timer_mod(v1s->cuda_sr_timer, v1s->cuda_sr_due);
+}
+
+/*
+ * The ROM polls IFR in tight loops whose timeouts are counted in loop
+ * iterations, and it reads SR to clear a stale flag right after toggling
+ * TACK. So a polling host gets the SR interrupt once it has made a few
+ * more VIA reads, independent of how fast QEMU runs; the timer covers a
+ * host that waits for the interrupt instead.
+ */
+static void via1_cuda_check_sr_int(MOS6522Q800VIA1State *v1s)
+{
+    if (v1s->cuda_sr_due && --v1s->cuda_sr_reads < 0) {
+        timer_del(v1s->cuda_sr_timer);
+        via1_cuda_sr_int(v1s);
+    }
+}
+
+static void via1_cuda_receive_packet(MOS6522Q800VIA1State *v1s,
+                                     const uint8_t *data, int len);
+
+static void via1_cuda_update(MOS6522Q800VIA1State *v1s)
+{
+    MOS6522State *ms = MOS6522(v1s);
+    ADBBusState *adb_bus = &v1s->adb_bus;
+    uint8_t last = v1s->cuda_last_b;
+    bool packet_received = false;
+    int len;
+
+    if (!(ms->b & CUDA_TIP)) {
+        /* transaction in progress: one byte per TIP/TACK edge */
+        if ((ms->b ^ last) & (CUDA_TACK | CUDA_TIP)) {
+            if (ms->acr & VIA1ACR_vShiftOut) {
+                /* host to Cuda */
+                if (v1s->cuda_out_index == 0) {
+                    adb_autopoll_block(adb_bus);
+                }
+                if (v1s->cuda_out_index < sizeof(v1s->cuda_out)) {
+                    v1s->cuda_out[v1s->cuda_out_index++] = ms->sr;
+                }
+                via1_cuda_delay_sr_int(v1s);
+            } else if (v1s->cuda_in_index < v1s->cuda_in_size) {
+                /* Cuda to host */
+                ms->sr = v1s->cuda_in[v1s->cuda_in_index++];
+                if (v1s->cuda_in_index >= v1s->cuda_in_size) {
+                    /* last byte */
+                    ms->b |= CUDA_TREQ;
+                }
+                via1_cuda_delay_sr_int(v1s);
+            }
+        }
+    } else {
+        if ((last & CUDA_TIP) && ((ms->b ^ last) & CUDA_TACK)) {
+            /* idle sync handshake: TREQ follows TACK */
+            if (ms->b & CUDA_TACK) {
+                ms->b |= CUDA_TREQ;
+            } else {
+                ms->b &= ~CUDA_TREQ;
+            }
+            via1_cuda_delay_sr_int(v1s);
+        } else {
+            if (!(last & CUDA_TIP)) {
+                /* TIP went high: the transaction is over */
+                if (v1s->cuda_out_index > 0) {
+                    packet_received = true;
+                } else if (v1s->cuda_in_size) {
+                    /* the host may stop reading before the end */
+                    v1s->cuda_in_size = 0;
+                    v1s->cuda_in_index = 0;
+                    ms->b |= CUDA_TREQ;
+                    adb_autopoll_unblock(adb_bus);
+                }
+                via1_cuda_delay_sr_int(v1s);
+            }
+            if (v1s->cuda_in_index < v1s->cuda_in_size) {
+                ms->b &= ~CUDA_TREQ;
+            }
+        }
+    }
+
+    v1s->cuda_last_b = ms->b;
+
+    if (packet_received) {
+        len = v1s->cuda_out_index;
+        v1s->cuda_out_index = 0;
+        via1_cuda_receive_packet(v1s, v1s->cuda_out, len);
+    }
+}
+
+static void via1_cuda_send_packet(MOS6522Q800VIA1State *v1s,
+                                  const uint8_t *data, int len)
+{
+    MOS6522State *ms = MOS6522(v1s);
+
+    assert(len <= sizeof(v1s->cuda_in));
+    trace_via1_cuda_send(len, data[0], len > 1 ? data[1] : -1,
+                         len > 2 ? data[2] : -1);
+    memcpy(v1s->cuda_in, data, len);
+    v1s->cuda_in_size = len;
+    v1s->cuda_in_index = 0;
+    adb_autopoll_block(&v1s->adb_bus);
+    /* signal that there is data to read */
+    if (ms->b & CUDA_TIP) {
+        ms->b &= ~CUDA_TREQ;
+    }
+    v1s->cuda_last_b = ms->b;
+    via1_cuda_delay_sr_int(v1s);
+}
+
+static void via1_cuda_adb_poll(void *opaque)
+{
+    MOS6522Q800VIA1State *v1s = opaque;
+    uint8_t obuf[ADB_MAX_OUT_LEN + 2];
+    int olen;
+
+    if (v1s->cuda_in_size || v1s->cuda_out_index) {
+        return;
+    }
+    olen = adb_poll(&v1s->adb_bus, obuf + 2, v1s->adb_bus.autopoll_mask);
+    if (olen > 0) {
+        obuf[0] = CUDA_ADB_PACKET;
+        obuf[1] = 0x40; /* autopoll data */
+        via1_cuda_send_packet(v1s, obuf, olen + 2);
+    }
+}
+
+static uint32_t via1_cuda_get_time(MOS6522Q800VIA1State *v1s)
+{
+    return v1s->tick_offset + (qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL) /
+                               NANOSECONDS_PER_SECOND);
+}
+
+/*
+ * The 68HC05's memory as the host sees it with the 6805 address commands:
+ * PRAM lives in its RAM at 0x100-0x1ff (the 68k ROM uses that window
+ * rather than the PRAM commands); the rest reads back what was written.
+ */
+static uint8_t via1_cuda_mem_read(MOS6522Q800VIA1State *v1s, uint16_t addr)
+{
+    if (addr >= 0x100 && addr < 0x200) {
+        return v1s->PRAM[addr - 0x100];
+    }
+    return addr < sizeof(v1s->cuda_mem) ? v1s->cuda_mem[addr] : 0;
+}
+
+static void via1_cuda_mem_write(MOS6522Q800VIA1State *v1s, uint16_t addr,
+                                uint8_t val)
+{
+    if (addr >= 0x100 && addr < 0x200) {
+        v1s->PRAM[addr - 0x100] = val;
+        pram_update(v1s);
+    } else if (addr < sizeof(v1s->cuda_mem)) {
+        v1s->cuda_mem[addr] = val;
+    }
+}
+
+/* Handle a pseudo (Cuda) command; returns the reply data length or -1 */
+static int via1_cuda_command(MOS6522Q800VIA1State *v1s, const uint8_t *in,
+                             int in_len, uint8_t *out)
+{
+    ADBBusState *adb_bus = &v1s->adb_bus;
+    uint8_t cmd = in[0];
+    int addr, i, n;
+    uint32_t ti;
+
+    in++;
+    in_len--;
+    switch (cmd) {
+    case CUDA_WARM_START:
+    case CUDA_POWERUP_TIME:
+    case CUDA_MS_RESET:
+    case CUDA_SEND_DFAC:
+    case CUDA_SET_IPL:
+    case CUDA_FILE_SERVER_FLAG:
+    case CUDA_SET_POWER_MESSAGES:
+    case CUDA_TIMER_TICKLE:
+        return 0;
+    case CUDA_AUTOPOLL:
+        if (in_len < 1) {
+            return -1;
+        }
+        adb_set_autopoll_enabled(adb_bus, in[0] != 0);
+        return 0;
+    case CUDA_SET_AUTO_RATE:
+        if (in_len < 1) {
+            return -1;
+        }
+        if (in[0]) {
+            adb_set_autopoll_rate_ms(adb_bus, in[0]);
+        }
+        return 0;
+    case CUDA_GET_AUTO_RATE:
+        out[0] = adb_bus->autopoll_rate_ms;
+        return 1;
+    case CUDA_SET_DEVICE_LIST:
+        if (in_len < 2) {
+            return -1;
+        }
+        adb_set_autopoll_mask(adb_bus, (in[0] << 8) | in[1]);
+        return 0;
+    case CUDA_GET_DEVICE_LIST:
+        out[0] = adb_bus->autopoll_mask >> 8;
+        out[1] = adb_bus->autopoll_mask;
+        return 2;
+    case CUDA_SET_ONE_SECOND_MODE:
+        if (in_len < 1) {
+            return -1;
+        }
+        v1s->cuda_one_sec_mode = in[0];
+        v1s->cuda_time_sent = false;
+        return 0;
+    case CUDA_GET_TIME:
+        ti = via1_cuda_get_time(v1s);
+        stl_be_p(out, ti);
+        return 4;
+    case CUDA_SET_TIME:
+        if (in_len < 4) {
+            return -1;
+        }
+        v1s->tick_offset = ldl_be_p(in) - (qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL)
+                                           / NANOSECONDS_PER_SECOND);
+        return 0;
+    case CUDA_GET_PRAM:
+        if (in_len < 2) {
+            return -1;
+        }
+        /* data streams from the address on until the host stops reading */
+        addr = ((in[0] << 8) | in[1]) & 0xff;
+        n = sizeof(v1s->PRAM) - addr;
+        memcpy(out, &v1s->PRAM[addr], n);
+        return n;
+    case CUDA_SET_PRAM:
+        if (in_len < 2) {
+            return -1;
+        }
+        addr = (in[0] << 8) | in[1];
+        for (i = 2; i < in_len; i++) {
+            v1s->PRAM[(addr + i - 2) & 0xff] = in[i];
+        }
+        pram_update(v1s);
+        return 0;
+    case CUDA_GET_6805_ADDR:
+        if (in_len < 2) {
+            return -1;
+        }
+        /* streams from the address on, like GET_PRAM */
+        addr = (in[0] << 8) | in[1];
+        for (n = 0; n < 256; n++) {
+            out[n] = via1_cuda_mem_read(v1s, addr + n);
+        }
+        return n;
+    case CUDA_SET_6805_ADDR:
+        if (in_len < 2) {
+            return -1;
+        }
+        addr = (in[0] << 8) | in[1];
+        for (i = 2; i < in_len; i++) {
+            via1_cuda_mem_write(v1s, addr + i - 2, in[i]);
+        }
+        return 0;
+    case CUDA_BATTERY_SWAP_SENSE:
+        out[0] = 0;
+        return 1;
+    case CUDA_POWERDOWN:
+        qemu_system_shutdown_request(SHUTDOWN_CAUSE_GUEST_SHUTDOWN);
+        return 0;
+    case CUDA_RESET_SYSTEM:
+        qemu_system_reset_request(SHUTDOWN_CAUSE_GUEST_RESET);
+        return 0;
+    default:
+        qemu_log_mask(LOG_UNIMP, "Cuda: unimplemented command 0x%02x\n", cmd);
+        return 0;
+    }
+}
+
+static void via1_cuda_receive_packet(MOS6522Q800VIA1State *v1s,
+                                     const uint8_t *data, int len)
+{
+    uint8_t obuf[sizeof(v1s->cuda_in)];
+    int olen;
+
+    trace_via1_cuda_receive(len, data[0], len > 1 ? data[1] : -1,
+                            len > 2 ? data[2] : -1, len > 3 ? data[3] : -1);
+    switch (data[0]) {
+    case CUDA_ADB_PACKET:
+        if (len < 2) {
+            break;
+        }
+        olen = adb_request(&v1s->adb_bus, obuf + 3, data + 1, len - 1);
+        obuf[0] = CUDA_ADB_PACKET;
+        obuf[2] = data[1];
+        if (olen > 0) {
+            obuf[1] = 0x00;
+        } else {
+            /* no device: Cuda reports a timeout */
+            obuf[1] = olen ? -olen : 0;
+            olen = 0;
+        }
+        via1_cuda_send_packet(v1s, obuf, olen + 3);
+        return;
+    case CUDA_PSEUDO_PACKET:
+        if (len < 2) {
+            break;
+        }
+        olen = via1_cuda_command(v1s, data + 1, len - 1, obuf + 3);
+        if (olen >= 0) {
+            obuf[0] = CUDA_PSEUDO_PACKET;
+            obuf[1] = 0;
+            obuf[2] = data[1];
+            via1_cuda_send_packet(v1s, obuf, olen + 3);
+        } else {
+            obuf[0] = CUDA_ERROR_PACKET;
+            obuf[1] = 0x5; /* bad parameters */
+            obuf[2] = data[0];
+            obuf[3] = data[1];
+            via1_cuda_send_packet(v1s, obuf, 4);
+        }
+        return;
+    }
+
+    qemu_log_mask(LOG_GUEST_ERROR, "Cuda: unknown packet type 0x%02x\n",
+                  data[0]);
+    obuf[0] = CUDA_ERROR_PACKET;
+    obuf[1] = 0x2; /* unknown packet */
+    obuf[2] = data[0];
+    obuf[3] = len > 1 ? data[1] : 0;
+    via1_cuda_send_packet(v1s, obuf, 4);
+}
+
+static void via1_cuda_tick(MOS6522Q800VIA1State *v1s)
+{
+    uint8_t obuf[7] = { CUDA_PSEUDO_PACKET, 0, CUDA_GET_TIME };
+
+    if (!v1s->cuda_one_sec_mode || v1s->cuda_in_size || v1s->cuda_out_index) {
+        return;
+    }
+    if (v1s->cuda_one_sec_mode == 3 && v1s->cuda_time_sent) {
+        /* plain tick */
+        obuf[0] = CUDA_TICK_PACKET;
+        via1_cuda_send_packet(v1s, obuf, 2);
+        return;
+    }
+    /* time packet, same layout as the GET_TIME reply */
+    stl_be_p(obuf + 3, via1_cuda_get_time(v1s));
+    via1_cuda_send_packet(v1s, obuf, sizeof(obuf));
+    v1s->cuda_time_sent = true;
+}
+
 static uint64_t mos6522_q800_via1_read(void *opaque, hwaddr addr, unsigned size)
 {
     MOS6522Q800VIA1State *s = MOS6522_Q800_VIA1(opaque);
@@ -1043,6 +1442,9 @@ static uint64_t mos6522_q800_via1_read(void *opaque, hwaddr addr, unsigned size)
     int64_t now;
 
     addr = (addr >> 9) & 0xf;
+    if (s->cuda) {
+        via1_cuda_check_sr_int(s);
+    }
     ret = mos6522_read(ms, addr, size);
     switch (addr) {
     case VIA_REG_A:
@@ -1094,6 +1496,12 @@ static void mos6522_q800_via1_write(void *opaque, hwaddr addr, uint64_t val,
         qemu_set_irq(v1s->headsel_irq, (ms->a & VIA1A_vHeadSel) != 0);
         break;
     case VIA_REG_B:
+        if (v1s->cuda) {
+            via1_cuda_update(v1s);
+            via1_auxmode_update(v1s);
+            v1s->last_b = ms->b;
+            break;
+        }
         via1_rtc_update(v1s);
         via1_adb_update(v1s);
         via1_auxmode_update(v1s);
@@ -1101,7 +1509,17 @@ static void mos6522_q800_via1_write(void *opaque, hwaddr addr, uint64_t val,
         v1s->last_b = ms->b;
         break;
 
+    case VIA_REG_ACR:
+        if (v1s->cuda) {
+            via1_cuda_update(v1s);
+        }
+        break;
     case VIA_REG_SR:
+        if (v1s->cuda) {
+            /* a write to SR clears its interrupt flag */
+            mos6522_read(ms, VIA_REG_SR, 1);
+            break;
+        }
         {
             /*
              * NetBSD assumes it can send its first ADB command after sending
@@ -1229,14 +1647,29 @@ static void mos6522_q800_via1_reset_hold(Object *obj, ResetType type)
     ms->timers[1].frequency = VIA_TIMER_FREQ;
 
     ms->b = VIA1B_vADB_StateMask | VIA1B_vADBInt | VIA1B_vRTCEnb;
+    if (v1s->cuda) {
+        /* TIP and TACK idle high, no request pending */
+        timer_del(v1s->cuda_sr_timer);
+        v1s->cuda_sr_due = 0;
+        v1s->cuda_last_b = ms->b;
+        v1s->cuda_in_size = 0;
+        v1s->cuda_in_index = 0;
+        v1s->cuda_out_index = 0;
+        v1s->cuda_one_sec_mode = 0;
+        adb_set_autopoll_enabled(adb_bus, false);
+        adb_autopoll_unblock(adb_bus);
+    }
 
-    /* ADB/RTC */
-    adb_set_autopoll_enabled(adb_bus, true);
+    /* ADB/RTC; Cuda only polls once the host asks it to */
+    adb_set_autopoll_enabled(adb_bus, !v1s->cuda);
     v1s->cmd = REG_EMPTY;
     v1s->alt = REG_EMPTY;
 
-    /* Timer calibration hack */
-    v1s->timer_hack_state = 0;
+    /*
+     * Timer calibration hack. Cuda machines leave VIA1 PCR at 0 rather
+     * than writing the 0x22 the hack waits for, so start it armed.
+     */
+    v1s->timer_hack_state = v1s->cuda ? 1 : 0;
 
     qemu_set_irq(v1s->headsel_irq, 0);
 }
@@ -1258,7 +1691,13 @@ static void mos6522_q800_via1_realize(DeviceState *dev, Error **errp)
     qemu_get_timedate(&tm, 0);
     v1s->tick_offset = (uint32_t)mktimegm(&tm) + RTC_OFFSET;
 
-    adb_register_autopoll_callback(adb_bus, adb_via_poll, v1s);
+    if (v1s->cuda) {
+        adb_register_autopoll_callback(adb_bus, via1_cuda_adb_poll, v1s);
+        v1s->cuda_sr_timer = timer_new_ns(QEMU_CLOCK_VIRTUAL,
+                                          via1_cuda_sr_int, v1s);
+    } else {
+        adb_register_autopoll_callback(adb_bus, adb_via_poll, v1s);
+    }
     v1s->adb_data_ready = qdev_get_gpio_in(dev, VIA1_IRQ_ADB_READY_BIT);
 
     if (v1s->blk) {
@@ -1342,6 +1781,7 @@ static const Property mos6522_q800_via1_properties[] = {
     DEFINE_PROP_DRIVE("drive", MOS6522Q800VIA1State, blk),
     DEFINE_PROP_UINT8("cpuid", MOS6522Q800VIA1State, cpuid, VIA1A_CPUID_Q800),
     DEFINE_PROP_UINT8("porta-pullup", MOS6522Q800VIA1State, porta_pullup, 0),
+    DEFINE_PROP_BOOL("cuda", MOS6522Q800VIA1State, cuda, false),
 };
 
 static void mos6522_q800_via1_class_init(ObjectClass *oc, const void *data)
