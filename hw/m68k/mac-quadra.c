@@ -328,6 +328,7 @@ static void q800_machine_init(MachineState *machine)
     CPUState *cs;
     DeviceState *dev;
     SysBusESPState *sysbus_esp;
+    qemu_irq scsi_irq, scsi_drq;
     ESPState *esp;
     SysBusDevice *sysbus;
     BusState *adb_bus;
@@ -536,23 +537,10 @@ static void q800_machine_init(MachineState *machine)
 
     /* SCSI */
 
-    object_initialize_child(OBJECT(machine), "esp", &m->esp,
-                            TYPE_SYSBUS_ESP);
-    sysbus_esp = SYSBUS_ESP(&m->esp);
-    esp = &sysbus_esp->esp;
-    esp->dma_memory_read = NULL;
-    esp->dma_memory_write = NULL;
-    esp->dma_opaque = NULL;
-    sysbus_esp->it_shift = 4;
-    esp->dma_enabled = 1;
 
-    sysbus = SYS_BUS_DEVICE(&m->esp);
-    sysbus_realize(sysbus, &error_fatal);
     /* SCSI and SCSI data IRQs are negative edge triggered */
-    sysbus_connect_irq(sysbus, 0,
-                       qemu_irq_invert(
-                           qdev_get_gpio_in(DEVICE(&m->via2),
-                                                   VIA2_IRQ_SCSI_BIT)));
+    scsi_irq = qemu_irq_invert(qdev_get_gpio_in(DEVICE(&m->via2),
+                                                VIA2_IRQ_SCSI_BIT));
     if (model->scsi_drq_dafb) {
         /*
          * DRQ goes to the DAFB (wired up with the video) and to VIA2 CA2,
@@ -568,14 +556,56 @@ static void q800_machine_init(MachineState *machine)
                                       qdev_get_gpio_in(DEVICE(&m->via2),
                                                        VIA2_IRQ_SCSI_DATA_BIT)));
         }
-        sysbus_connect_irq(sysbus, 1,
-                           qdev_get_gpio_in(DEVICE(&m->scsi_drq_split), 0));
+        scsi_drq = qdev_get_gpio_in(DEVICE(&m->scsi_drq_split), 0);
     } else {
-        sysbus_connect_irq(sysbus, 1,
-                           qemu_irq_invert(
-                               qdev_get_gpio_in(DEVICE(&m->via2),
-                                                       VIA2_IRQ_SCSI_DATA_BIT)));
+        scsi_drq = qemu_irq_invert(qdev_get_gpio_in(DEVICE(&m->via2),
+                                                    VIA2_IRQ_SCSI_DATA_BIT));
     }
+
+    if (model->esp2_base) {
+        /*
+         * The Quadra 900's external bus has its own 53C96, laid out like
+         * the internal one. The two chips share the SCSI interrupt; its
+         * data request has a DAFB register of its own (wired up with the
+         * video).
+         */
+        object_initialize_child(OBJECT(machine), "scsi-irq-or",
+                                &m->scsi_irq_or, TYPE_OR_IRQ);
+        qdev_prop_set_uint16(DEVICE(&m->scsi_irq_or), "num-lines", 2);
+        qdev_realize(DEVICE(&m->scsi_irq_or), NULL, &error_fatal);
+        qdev_connect_gpio_out(DEVICE(&m->scsi_irq_or), 0, scsi_irq);
+        scsi_irq = qdev_get_gpio_in(DEVICE(&m->scsi_irq_or), 0);
+
+        object_initialize_child(OBJECT(machine), "esp2", &m->esp2,
+                                TYPE_SYSBUS_ESP);
+        m->esp2.it_shift = 4;
+        m->esp2.esp.dma_enabled = 1;
+        sysbus_realize(SYS_BUS_DEVICE(&m->esp2), &error_fatal);
+        sysbus_connect_irq(SYS_BUS_DEVICE(&m->esp2), 0,
+                           qdev_get_gpio_in(DEVICE(&m->scsi_irq_or), 1));
+        memory_region_add_subregion(&m->macio, model->esp2_base - IO_BASE,
+                        sysbus_mmio_get_region(SYS_BUS_DEVICE(&m->esp2), 0));
+        memory_region_add_subregion(&m->macio, model->esp2_pdma - IO_BASE,
+                        sysbus_mmio_get_region(SYS_BUS_DEVICE(&m->esp2), 1));
+    }
+    /*
+     * The internal bus is created last: -device scsi-hd/scsi-cd without
+     * bus= goes on the newest SCSI bus.
+     */
+    object_initialize_child(OBJECT(machine), "esp", &m->esp,
+                            TYPE_SYSBUS_ESP);
+    sysbus_esp = SYSBUS_ESP(&m->esp);
+    esp = &sysbus_esp->esp;
+    esp->dma_memory_read = NULL;
+    esp->dma_memory_write = NULL;
+    esp->dma_opaque = NULL;
+    sysbus_esp->it_shift = 4;
+    esp->dma_enabled = 1;
+
+    sysbus = SYS_BUS_DEVICE(&m->esp);
+    sysbus_realize(sysbus, &error_fatal);
+    sysbus_connect_irq(sysbus, 0, scsi_irq);
+    sysbus_connect_irq(sysbus, 1, scsi_drq);
     memory_region_add_subregion(&m->macio, model->esp_base - IO_BASE,
                                 sysbus_mmio_get_region(sysbus, 0));
     memory_region_add_subregion(&m->macio, model->esp_pdma - IO_BASE,
@@ -678,6 +708,10 @@ static void q800_machine_init(MachineState *machine)
     if (model->scsi_drq_dafb) {
         qdev_connect_gpio_out(DEVICE(&m->scsi_drq_split), 1,
                               qdev_get_gpio_in_named(dev, "scsi-drq", 0));
+    }
+    if (model->esp2_base) {
+        sysbus_connect_irq(SYS_BUS_DEVICE(&m->esp2), 1,
+                           qdev_get_gpio_in_named(dev, "scsi-drq", 1));
     }
 
     cs = CPU(&m->cpu);

@@ -40,6 +40,8 @@ static const MacQuadraModel q900_model = {
     .scsi_drq_dafb = true,
     .esp_base = MAC_QUADRA_IO_BASE + 0x0f000,
     .esp_pdma = MAC_QUADRA_IO_BASE + 0x0f100,
+    .esp2_base = MAC_QUADRA_IO_BASE + 0x0f402,
+    .esp2_pdma = MAC_QUADRA_IO_BASE + 0x0f502,
     /* slot 0x9 is the in-built framebuffer, 0xa-0xe the five NuBus slots */
     .nubus_slots = BIT(0x9) | BIT(0xa) | BIT(0xb) | BIT(0xc) | BIT(0xd) |
                    BIT(0xe),

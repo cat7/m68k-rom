@@ -79,6 +79,8 @@ typedef struct MacQuadraModel {
     bool scsi_drq_dafb;           /* SCSI DRQ also readable in DAFB */
     hwaddr esp_base;
     hwaddr esp_pdma;
+    hwaddr esp2_base;             /* second (external) SCSI bus, 0: none */
+    hwaddr esp2_pdma;
     uint32_t nubus_slots;         /* NuBus slot-available-mask */
     ram_addr_t max_ram_size;
     /* screen when no -g is given (0: 800x600x8) */
@@ -110,6 +112,8 @@ struct MacQuadraMachineState {
     OrIRQState escc_orgate;
     SplitIRQ scsi_drq_split;
     SysBusESPState esp;
+    SysBusESPState esp2;
+    OrIRQState scsi_irq_or;
     SWIM2State swim2;
     MacNubusBridge mac_nubus_bridge;
     MacfbNubusState macfb;
