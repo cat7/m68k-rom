@@ -117,6 +117,13 @@ static const MacFbMode macfb_mode_table[] = {
     { MACFB_DISPLAY_APPLE_21_COLOR, 2, 0x90, 0x502, 1152, 870, 0x240, 0x80 },
     { MACFB_DISPLAY_APPLE_21_COLOR, 4, 0x90, 0x500, 1152, 870, 0x240, 0x80 },
     { MACFB_DISPLAY_APPLE_21_COLOR, 8, 0x120, 0x5ff, 1152, 870, 0x480, 0x80 },
+
+    /*
+     * Quadra 700 DAFB: CTRL2 bits 11-8 are 0x6 rather than 0x7 and the
+     * frame buffer layout differs (read from the ROM's ScreenRow and
+     * ScrnBase low memory globals).
+     */
+    { MACFB_DISPLAY_VGA, 1, 0x100, 0x61e, 640, 480, 0x240, 0xe00 },
 };
 
 typedef void macfb_draw_line_func(MacfbState *s, uint8_t *d, uint32_t addr,
@@ -411,8 +418,8 @@ static void macfb_mode_write(MacfbState *s)
 
         if ((s->regs[DAFB_MODE_CTRL1 >> 2] & 0xff) ==
              (macfb_mode->mode_ctrl1 & 0xff) &&
-            (s->regs[DAFB_MODE_CTRL2 >> 2] & 0xff) ==
-             (macfb_mode->mode_ctrl2 & 0xff)) {
+            (s->regs[DAFB_MODE_CTRL2 >> 2] & 0xfff) ==
+             (macfb_mode->mode_ctrl2 & 0xfff)) {
             s->mode = macfb_mode;
             macfb_update_mode(s);
             break;
