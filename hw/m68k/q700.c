@@ -36,6 +36,10 @@ static const MacQuadraModel q700_model = {
     /* slot 0x9 is the in-built framebuffer; slot numbering to be verified */
     .nubus_slots = BIT(0x9) | BIT(0xd) | BIT(0xe),
     .max_ram_size = 256 * MiB,
+    /* Apple 16" color; the ROM has no 800x600 mode */
+    .fb_width = 832,
+    .fb_height = 624,
+    .fb_depth = 8,
 };
 
 static const TypeInfo q700_machine_types[] = {

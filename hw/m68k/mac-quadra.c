@@ -596,9 +596,12 @@ static void q800_machine_init(MachineState *machine)
                             TYPE_NUBUS_MACFB);
     dev = DEVICE(&m->macfb);
     qdev_prop_set_uint32(dev, "slot", 9);
-    qdev_prop_set_uint32(dev, "width", graphic_width ?: 800);
-    qdev_prop_set_uint32(dev, "height", graphic_height ?: 600);
-    qdev_prop_set_uint8(dev, "depth", graphic_depth ?: 8);
+    qdev_prop_set_uint32(dev, "width",
+                         graphic_width ?: (model->fb_width ?: 800));
+    qdev_prop_set_uint32(dev, "height",
+                         graphic_height ?: (model->fb_height ?: 600));
+    qdev_prop_set_uint8(dev, "depth",
+                        graphic_depth ?: (model->fb_depth ?: 8));
     qdev_realize(dev, BUS(nubus), &error_fatal);
 
     macfb_mode = (NUBUS_MACFB(dev)->macfb).mode;
@@ -643,7 +646,7 @@ static void q800_machine_init(MachineState *machine)
                   VIDEO_BASE + macfb_mode->offset);
         BOOTINFO1(param_ptr, BI_MAC_VDEPTH, macfb_mode->depth);
         BOOTINFO1(param_ptr, BI_MAC_VDIM,
-                  (graphic_height << 16) | macfb_mode->width);
+                  (macfb_mode->height << 16) | macfb_mode->width);
         BOOTINFO1(param_ptr, BI_MAC_VROW, macfb_mode->stride);
         BOOTINFO1(param_ptr, BI_MAC_SCCBASE, SCC_BASE);
 

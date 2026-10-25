@@ -73,6 +73,9 @@ typedef struct MacQuadraModel {
     hwaddr esp_pdma;
     uint32_t nubus_slots;         /* NuBus slot-available-mask */
     ram_addr_t max_ram_size;
+    /* screen when no -g is given (0: 800x600x8) */
+    uint32_t fb_width, fb_height;
+    uint8_t fb_depth;
 } MacQuadraModel;
 
 struct MacQuadraMachineClass {
