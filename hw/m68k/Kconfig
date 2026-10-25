@@ -26,6 +26,7 @@ config MAC_QUADRA
     select NUBUS
     select MACFB
     select SWIM
+    select SWIM2
     select ESCC
     select ESP
     select DP8393X

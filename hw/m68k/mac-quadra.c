@@ -94,6 +94,11 @@
 #define Q800_MACHINE_ID    0xa55a2bad
 
 
+static void swim2_headsel(void *opaque, int n, int level)
+{
+    swim2_set_sel(opaque, level);
+}
+
 static void main_cpu_reset(void *opaque)
 {
     M68kCPU *cpu = opaque;
@@ -537,9 +542,24 @@ static void q800_machine_init(MachineState *machine)
 
     /* SWIM floppy controller */
 
-    object_initialize_child(OBJECT(machine), "swim", &m->swim,
-                            TYPE_SWIM);
-    sysbus = SYS_BUS_DEVICE(&m->swim);
+    switch (model->floppy) {
+    case MAC_FLOPPY_SWIM:
+        object_initialize_child(OBJECT(machine), "swim", &m->swim,
+                                TYPE_SWIM);
+        sysbus = SYS_BUS_DEVICE(&m->swim);
+        break;
+    case MAC_FLOPPY_SWIM2:
+        object_initialize_child(OBJECT(machine), "swim", &m->swim2,
+                                TYPE_SWIM2);
+        sysbus = SYS_BUS_DEVICE(&m->swim2);
+        /* drive head select comes from VIA1 PA5 */
+        qdev_connect_gpio_out_named(DEVICE(&m->via1), "headsel", 0,
+                                    qemu_allocate_irq(swim2_headsel,
+                                                      &m->swim2, 0));
+        break;
+    default:
+        g_assert_not_reached();
+    }
     sysbus_realize(sysbus, &error_fatal);
     memory_region_add_subregion(&m->macio, SWIM_BASE - IO_BASE,
                                 sysbus_mmio_get_region(sysbus, 0));

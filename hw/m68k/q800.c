@@ -20,6 +20,7 @@ static const MacQuadraModel q800_model = {
     .bootinfo_model = MAC_MODEL_Q800,
     .via1_cpuid = VIA1A_CPUID_Q800,
     .memctrl = MAC_MEMCTRL_DJMEMC,
+    .floppy = MAC_FLOPPY_SWIM2,
     .has_machine_id_reg = true,
     .default_easc = true,
     .esp_base = MAC_QUADRA_IO_BASE + 0x10000,

@@ -51,6 +51,7 @@ struct MOS6522Q800VIA1State {
     MemoryRegion via_mem;
 
     qemu_irq auxmode_irq;
+    qemu_irq headsel_irq;
     uint8_t last_b;
 
     /* Machine ID bits returned on port A (VIA1A_CPUID_MASK) */

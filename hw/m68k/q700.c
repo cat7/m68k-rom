@@ -27,6 +27,7 @@ static const MacQuadraModel q700_model = {
     /* PA0 low at power-on makes the ROM enter its factory test mode */
     .via1_porta_pullup = 0x01,
     .memctrl = MAC_MEMCTRL_ORWELL,
+    .floppy = MAC_FLOPPY_SWIM,
     .has_machine_id_reg = false,
     .default_easc = false,
     .scsi_drq_dafb = true,

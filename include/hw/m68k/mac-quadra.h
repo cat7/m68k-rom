@@ -35,6 +35,7 @@
 #include "hw/core/split-irq.h"
 #include "hw/scsi/esp.h"
 #include "hw/block/swim.h"
+#include "hw/block/swim2.h"
 #include "hw/nubus/mac-nubus-bridge.h"
 #include "hw/display/macfb.h"
 #include "hw/misc/djmemc.h"
@@ -53,6 +54,11 @@ typedef enum MacMemCtrl {
     MAC_MEMCTRL_ORWELL,     /* Orwell: Quadra 700/900/950 */
 } MacMemCtrl;
 
+typedef enum MacFloppyCtrl {
+    MAC_FLOPPY_SWIM,        /* original SWIM (IWM + ISM): Quadra 700/900 */
+    MAC_FLOPPY_SWIM2,       /* SWIM2 (ISM only): Quadra 800 */
+} MacFloppyCtrl;
+
 typedef struct MacQuadraModel {
     const char *desc;
     const char *rom_filename;     /* default for -bios */
@@ -60,6 +66,7 @@ typedef struct MacQuadraModel {
     uint8_t via1_cpuid;           /* ID bits on VIA1 port A */
     uint8_t via1_porta_pullup;    /* VIA1 port A inputs that read as 1 */
     MacMemCtrl memctrl;
+    MacFloppyCtrl floppy;
     bool has_machine_id_reg;      /* ID longword at 0x5ffffffc */
     bool default_easc;
     bool scsi_drq_dafb;           /* SCSI DRQ also readable in DAFB */
@@ -92,6 +99,7 @@ struct MacQuadraMachineState {
     SplitIRQ scsi_drq_split;
     SysBusESPState esp;
     Swim swim;
+    SWIM2State swim2;
     MacNubusBridge mac_nubus_bridge;
     MacfbNubusState macfb;
     DJMEMCState djmemc;

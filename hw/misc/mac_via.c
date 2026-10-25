@@ -1075,6 +1075,11 @@ static void mos6522_q800_via1_write(void *opaque, hwaddr addr, uint64_t val,
     mos6522_write(ms, addr, val, size);
 
     switch (addr) {
+    case VIA_REG_A:
+    case VIA_REG_ANH:
+        /* PA5 is the floppy drive head select (SEL) line */
+        qemu_set_irq(v1s->headsel_irq, (ms->a & VIA1A_vHeadSel) != 0);
+        break;
     case VIA_REG_B:
         via1_rtc_update(v1s);
         via1_adb_update(v1s);
@@ -1219,6 +1224,8 @@ static void mos6522_q800_via1_reset_hold(Object *obj, ResetType type)
 
     /* Timer calibration hack */
     v1s->timer_hack_state = 0;
+
+    qemu_set_irq(v1s->headsel_irq, 0);
 }
 
 static void mos6522_q800_via1_realize(DeviceState *dev, Error **errp)
@@ -1278,6 +1285,7 @@ static void mos6522_q800_via1_init(Object *obj)
 
     /* A/UX mode */
     qdev_init_gpio_out(DEVICE(obj), &v1s->auxmode_irq, 1);
+    qdev_init_gpio_out_named(DEVICE(obj), &v1s->headsel_irq, "headsel", 1);
 }
 
 static const VMStateDescription vmstate_q800_via1 = {
