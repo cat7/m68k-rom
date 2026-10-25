@@ -11,6 +11,7 @@
  */
 
 #include "qemu/osdep.h"
+#include "qemu/log.h"
 #include "qemu/timer.h"
 #include "qapi/error.h"
 #include "hw/core/sysbus.h"
@@ -684,12 +685,40 @@ static void asc_realize(DeviceState *dev, Error **errp)
     }
 }
 
+/*
+ * Unused offsets in the ASC window don't bus error on the real chip
+ * (A/UX touches the EASC FIFO control register at 0xf08 on an ASC).
+ */
+static uint64_t asc_hole_read(void *opaque, hwaddr addr, unsigned size)
+{
+    qemu_log_mask(LOG_UNIMP, "asc: read from unused offset 0x%" HWADDR_PRIx
+                  "\n", addr);
+    return 0;
+}
+
+static void asc_hole_write(void *opaque, hwaddr addr, uint64_t value,
+                           unsigned size)
+{
+    qemu_log_mask(LOG_UNIMP, "asc: write 0x%" PRIx64 " to unused offset 0x%"
+                  HWADDR_PRIx "\n", value, addr);
+}
+
+static const MemoryRegionOps asc_hole_ops = {
+    .read = asc_hole_read,
+    .write = asc_hole_write,
+    .endianness = DEVICE_BIG_ENDIAN,
+};
+
 static void asc_init(Object *obj)
 {
     ASCState *s = ASC(obj);
     SysBusDevice *sbd = SYS_BUS_DEVICE(obj);
 
     memory_region_init(&s->asc, OBJECT(obj), "asc", ASC_SIZE);
+
+    memory_region_init_io(&s->mem_hole, OBJECT(obj), &asc_hole_ops, s,
+                          "asc.unused", ASC_SIZE);
+    memory_region_add_subregion_overlap(&s->asc, 0, &s->mem_hole, -1);
 
     asc_fifo_init(&s->fifos[0], 0);
     asc_fifo_init(&s->fifos[1], 1);

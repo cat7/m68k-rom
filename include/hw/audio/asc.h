@@ -59,6 +59,7 @@ struct ASCState {
     MemoryRegion asc;
     MemoryRegion mem_fifo;
     MemoryRegion mem_regs;
+    MemoryRegion mem_hole;
     MemoryRegion mem_extregs;
 
     AudioBackend *audio_be;

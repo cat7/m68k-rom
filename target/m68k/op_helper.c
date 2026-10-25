@@ -439,9 +439,12 @@ void m68k_cpu_transaction_failed(CPUState *cs, hwaddr physaddr, vaddr addr,
          * In the case of a bus error e.g. during nubus read from an empty
          * slot this bit should not be set
          */
-        if (response != MEMTX_DECODE_ERROR) {
-            env->mmu.ssw |= M68K_ATC_040;
-        }
+        /*
+         * Build the SSW from scratch: bits left over from an earlier fault
+         * (e.g. ATC from a page fault under A/UX) made the Mac ROM treat a
+         * later empty-slot bus error as an MMU fault.
+         */
+        env->mmu.ssw = (response != MEMTX_DECODE_ERROR) ? M68K_ATC_040 : 0;
 
         /* FIXME: manage MMU table access error */
         env->mmu.ssw &= ~M68K_TM_040;

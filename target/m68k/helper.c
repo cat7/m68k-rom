@@ -204,6 +204,15 @@ void HELPER(m68k_movec_to)(CPUM68KState *env, uint32_t reg, uint32_t val)
     case M68K_CR_TC:
         if (m68k_feature(env, M68K_FEATURE_M68040)
          || m68k_feature(env, M68K_FEATURE_M68060)) {
+            /*
+             * QEMU's TLB caches the result of translation (including the
+             * untranslated MMU-off case), so it must not survive a change
+             * of the translation setup. E.g. A/UX jumps back into the Mac
+             * ROM with its own mappings cached.
+             */
+            if (env->mmu.tcr != val) {
+                tlb_flush(env_cpu(env));
+            }
             env->mmu.tcr = val;
             return;
         }
@@ -256,6 +265,9 @@ void HELPER(m68k_movec_to)(CPUM68KState *env, uint32_t reg, uint32_t val)
     /* MC68040/MC68LC040 */
     case M68K_CR_ITT0: /* MC68EC040 only: M68K_CR_IACR0 */
         if (m68k_feature(env, M68K_FEATURE_M68040)) {
+            if (env->mmu.ttr[M68K_ITTR0] != val) {
+                tlb_flush(env_cpu(env));   /* see M68K_CR_TC */
+            }
             env->mmu.ttr[M68K_ITTR0] = val;
             return;
         }
@@ -263,6 +275,9 @@ void HELPER(m68k_movec_to)(CPUM68KState *env, uint32_t reg, uint32_t val)
     /* MC68040/MC68LC040 */
     case M68K_CR_ITT1: /* MC68EC040 only: M68K_CR_IACR1 */
         if (m68k_feature(env, M68K_FEATURE_M68040)) {
+            if (env->mmu.ttr[M68K_ITTR1] != val) {
+                tlb_flush(env_cpu(env));   /* see M68K_CR_TC */
+            }
             env->mmu.ttr[M68K_ITTR1] = val;
             return;
         }
@@ -270,6 +285,9 @@ void HELPER(m68k_movec_to)(CPUM68KState *env, uint32_t reg, uint32_t val)
     /* MC68040/MC68LC040 */
     case M68K_CR_DTT0: /* MC68EC040 only: M68K_CR_DACR0 */
         if (m68k_feature(env, M68K_FEATURE_M68040)) {
+            if (env->mmu.ttr[M68K_DTTR0] != val) {
+                tlb_flush(env_cpu(env));   /* see M68K_CR_TC */
+            }
             env->mmu.ttr[M68K_DTTR0] = val;
             return;
         }
@@ -277,6 +295,9 @@ void HELPER(m68k_movec_to)(CPUM68KState *env, uint32_t reg, uint32_t val)
     /* MC68040/MC68LC040 */
     case M68K_CR_DTT1: /* MC68EC040 only: M68K_CR_DACR1 */
         if (m68k_feature(env, M68K_FEATURE_M68040)) {
+            if (env->mmu.ttr[M68K_DTTR1] != val) {
+                tlb_flush(env_cpu(env));   /* see M68K_CR_TC */
+            }
             env->mmu.ttr[M68K_DTTR1] = val;
             return;
         }
