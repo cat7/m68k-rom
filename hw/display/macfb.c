@@ -598,6 +598,14 @@ static uint64_t macfb_ctrl_read(void *opaque,
     default:
         if (addr < MACFB_CTRL_TOPADDR) {
             val = s->regs[addr >> 2];
+            if (size < 4) {
+                /*
+                 * Narrow reads return the addressed part of the big endian
+                 * register (SCSI Manager 4.3 reads the Turbo SCSI DRQ bit
+                 * with a byte access at 0x26)
+                 */
+                val = extract32(val, 8 * (4 - size - (addr & 3)), 8 * size);
+            }
         }
     }
 

@@ -1626,7 +1626,14 @@ static int mode_select_pages(SCSIDiskReq *r, uint8_t *p, int len, bool change)
             page_len = len;
         }
 
-        if (!change) {
+        if (page == 0x31 &&
+            (s->quirks & (1 << SCSI_DISK_QUIRK_MODE_PAGE_APPLE_VENDOR))) {
+            /*
+             * Apple CD-ROM vendor page: the Apple CD-ROM driver (System
+             * 7.5) selects it with 2 bytes (ff 00) and fails mounting the
+             * disc if it is refused. Accept and ignore it.
+             */
+        } else if (!change) {
             if (scsi_disk_check_mode_select(s, page, p, page_len) < 0) {
                 goto invalid_param;
             }
