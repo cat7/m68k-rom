@@ -40,6 +40,7 @@
 #include "hw/misc/djmemc.h"
 #include "hw/misc/iosb.h"
 #include "hw/misc/orwell.h"
+#include "hw/misc/mac_iop.h"
 #include "hw/audio/asc.h"
 
 /*
@@ -64,13 +65,16 @@ typedef struct MacQuadraModel {
     uint32_t bootinfo_model;      /* Gestalt ID passed to Linux */
     uint8_t via1_cpuid;           /* ID bits on VIA1 port A */
     uint8_t via1_porta_pullup;    /* VIA1 port A inputs that read as 1 */
+    uint8_t via2_portb_pullup;    /* VIA2 port B inputs that read as 1 */
     MacMemCtrl memctrl;
     MacFloppyCtrl floppy;
     bool has_machine_id_reg;      /* ID longword at 0x5ffffffc */
     uint32_t machine_id;          /* its value (0: Quadra 800's) */
     bool no_sonic;                /* no on-board Ethernet */
     bool cuda;                    /* ADB, RTC and PRAM behind Cuda */
+    bool egret;                   /* RTC and PRAM behind Egret */
     bool rom_mirror;              /* ROM repeats every 1 MiB up to 0x50000000 */
+    bool iop;                     /* SCC and SWIM/ADB behind IOPs */
     bool default_easc;
     bool scsi_drq_dafb;           /* SCSI DRQ also readable in DAFB */
     hwaddr esp_base;
@@ -112,6 +116,8 @@ struct MacQuadraMachineState {
     DJMEMCState djmemc;
     IOSBState iosb;
     OrwellState orwell;
+    MacIOPState scc_iop;
+    MacIOPState swim_iop;
     ASCState asc;
     MemoryRegion ramio;
     MemoryRegion macio;

@@ -99,6 +99,8 @@ struct MOS6522Q800VIA1State {
      * and TREQ on port B instead of the ADB state and RTC lines.
      */
     bool cuda;
+    bool egret;                   /* Egret: same packets, other handshake */
+    bool adb;                     /* ADB transceiver on PB4/PB5/SR */
     QEMUTimer *cuda_sr_timer;
     int64_t cuda_sr_due;          /* pending SR interrupt time, 0: none */
     int cuda_sr_reads;            /* VIA reads left before it is raised */
@@ -144,6 +146,8 @@ struct MOS6522Q800VIA2State {
     MOS6522State parent_obj;
 
     MemoryRegion via_mem;
+    /* Port B inputs pulled high on the board */
+    uint8_t portb_pullup;
 };
 
 #endif

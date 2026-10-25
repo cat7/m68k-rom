@@ -344,7 +344,7 @@ static void via1_one_second(void *opaque)
     qemu_irq_lower(irq);
     qemu_irq_raise(irq);
 
-    if (v1s->cuda) {
+    if (v1s->cuda || v1s->egret) {
         via1_cuda_tick(v1s);
     }
     via1_one_second_update(v1s);
@@ -1070,6 +1070,10 @@ static void via1_timer_calibration_hack(MOS6522Q800VIA1State *v1s, int addr,
 #define CUDA_ERROR_PACKET   2
 #define CUDA_TICK_PACKET    3
 
+#define EGRET_XCVR_SES      0x08
+#define EGRET_VIA_FULL      0x10
+#define EGRET_SYS_SES       0x20
+
 #define CUDA_SR_DELAY_NS    200000
 #define CUDA_SR_DELAY_READS 2
 
@@ -1183,6 +1187,20 @@ static void via1_cuda_send_packet(MOS6522Q800VIA1State *v1s,
     assert(len <= sizeof(v1s->cuda_in));
     trace_via1_cuda_send(len, data[0], len > 1 ? data[1] : -1,
                          len > 2 ? data[2] : -1);
+    if (v1s->egret) {
+        /* Egret starts with an attention byte, already in SR */
+        assert(len < sizeof(v1s->cuda_in));
+        v1s->cuda_in[0] = 0;
+        memcpy(v1s->cuda_in + 1, data, len);
+        v1s->cuda_in_size = len + 1;
+        v1s->cuda_in_index = 1;
+        ms->sr = 0;
+        ms->b &= ~EGRET_XCVR_SES;
+        adb_autopoll_block(&v1s->adb_bus);
+        v1s->cuda_last_b = ms->b;
+        via1_cuda_delay_sr_int(v1s);
+        return;
+    }
     memcpy(v1s->cuda_in, data, len);
     v1s->cuda_in_size = len;
     v1s->cuda_in_index = 0;
@@ -1193,6 +1211,80 @@ static void via1_cuda_send_packet(MOS6522Q800VIA1State *v1s,
     }
     v1s->cuda_last_b = ms->b;
     via1_cuda_delay_sr_int(v1s);
+}
+
+/*
+ * Egret (Quadra 900/950 and others): Cuda's predecessor. Same packets,
+ * but the reply starts with an attention byte and the handshake is
+ *
+ *   PB5  SysSes   (out) high while the host runs a session
+ *   PB4  ViaFull  (out) raised by the host when it put a byte in SR,
+ *                       lowered when it wants the next byte
+ *   PB3  XcvrSes  (in)  low while Egret sends; it goes high with the
+ *                       last byte
+ *
+ * A command ends when the host drops SysSes; Egret then answers by
+ * asserting XcvrSes and shifting in the attention byte. The host raises
+ * SysSes again for the next byte and toggles ViaFull for the rest.
+ */
+static void via1_egret_next_byte(MOS6522Q800VIA1State *v1s)
+{
+    MOS6522State *ms = MOS6522(v1s);
+
+    if (v1s->cuda_in_index < v1s->cuda_in_size) {
+        ms->sr = v1s->cuda_in[v1s->cuda_in_index++];
+        if (v1s->cuda_in_index >= v1s->cuda_in_size) {
+            ms->b |= EGRET_XCVR_SES;
+        }
+        via1_cuda_delay_sr_int(v1s);
+    }
+}
+
+static void via1_egret_update(MOS6522Q800VIA1State *v1s)
+{
+    MOS6522State *ms = MOS6522(v1s);
+    ADBBusState *adb_bus = &v1s->adb_bus;
+    uint8_t last = v1s->cuda_last_b;
+    uint8_t rise = ms->b & ~last;
+    uint8_t fall = ~ms->b & last;
+    int len;
+
+    if (v1s->cuda_in_size) {
+        /* Egret is sending */
+        if ((rise & EGRET_SYS_SES) ||
+            ((ms->b & EGRET_SYS_SES) && (fall & EGRET_VIA_FULL))) {
+            via1_egret_next_byte(v1s);
+        } else if (fall & EGRET_SYS_SES) {
+            /* the host ends the transfer, possibly early */
+            v1s->cuda_in_size = 0;
+            v1s->cuda_in_index = 0;
+            ms->b |= EGRET_XCVR_SES;
+            adb_autopoll_unblock(adb_bus);
+        }
+    } else if (ms->b & EGRET_SYS_SES) {
+        if (rise & EGRET_SYS_SES) {
+            v1s->cuda_out_index = 0;
+        }
+        if ((rise & EGRET_VIA_FULL) && (ms->acr & VIA1ACR_vShiftOut)) {
+            /* host to Egret */
+            if (v1s->cuda_out_index == 0) {
+                adb_autopoll_block(adb_bus);
+            }
+            if (v1s->cuda_out_index < sizeof(v1s->cuda_out)) {
+                v1s->cuda_out[v1s->cuda_out_index++] = ms->sr;
+            }
+            via1_cuda_delay_sr_int(v1s);
+        }
+    } else if ((fall & EGRET_SYS_SES) && v1s->cuda_out_index) {
+        /* end of the command */
+        len = v1s->cuda_out_index;
+        v1s->cuda_out_index = 0;
+        v1s->cuda_last_b = ms->b;
+        via1_cuda_receive_packet(v1s, v1s->cuda_out, len);
+        return;
+    }
+
+    v1s->cuda_last_b = ms->b;
 }
 
 static void via1_cuda_adb_poll(void *opaque)
@@ -1442,7 +1534,7 @@ static uint64_t mos6522_q800_via1_read(void *opaque, hwaddr addr, unsigned size)
     int64_t now;
 
     addr = (addr >> 9) & 0xf;
-    if (s->cuda) {
+    if (s->cuda || s->egret) {
         via1_cuda_check_sr_int(s);
     }
     ret = mos6522_read(ms, addr, size);
@@ -1496,14 +1588,20 @@ static void mos6522_q800_via1_write(void *opaque, hwaddr addr, uint64_t val,
         qemu_set_irq(v1s->headsel_irq, (ms->a & VIA1A_vHeadSel) != 0);
         break;
     case VIA_REG_B:
-        if (v1s->cuda) {
-            via1_cuda_update(v1s);
+        if (v1s->cuda || v1s->egret) {
+            if (v1s->egret) {
+                via1_egret_update(v1s);
+            } else {
+                via1_cuda_update(v1s);
+            }
             via1_auxmode_update(v1s);
             v1s->last_b = ms->b;
             break;
         }
         via1_rtc_update(v1s);
-        via1_adb_update(v1s);
+        if (v1s->adb) {
+            via1_adb_update(v1s);
+        }
         via1_auxmode_update(v1s);
 
         v1s->last_b = ms->b;
@@ -1515,7 +1613,7 @@ static void mos6522_q800_via1_write(void *opaque, hwaddr addr, uint64_t val,
         }
         break;
     case VIA_REG_SR:
-        if (v1s->cuda) {
+        if (v1s->cuda || v1s->egret) {
             /* a write to SR clears its interrupt flag */
             mos6522_read(ms, VIA_REG_SR, 1);
             break;
@@ -1542,7 +1640,8 @@ static void mos6522_q800_via1_write(void *opaque, hwaddr addr, uint64_t val,
                        VIA1B_vADB_StateShift;
             state = (ms->b & VIA1B_vADB_StateMask) >> VIA1B_vADB_StateShift;
 
-            if (oldstate == ADB_STATE_NEW && state == ADB_STATE_NEW &&
+            if (v1s->adb && oldstate == ADB_STATE_NEW &&
+                    state == ADB_STATE_NEW &&
                     (ms->acr & VIA1ACR_vShiftOut) &&
                     oldsr == 0 /* ADB_BUSRESET */) {
                 trace_via1_adb_netbsd_enum_hack();
@@ -1573,6 +1672,10 @@ static uint64_t mos6522_q800_via2_read(void *opaque, hwaddr addr, unsigned size)
     val = mos6522_read(ms, addr, size);
 
     switch (addr) {
+    case VIA_REG_B:
+        /* inputs pulled high on the board */
+        val |= s->portb_pullup & ~ms->dirb;
+        break;
     case VIA_REG_IFR:
         /*
          * On a Q800 an emulated VIA2 is integrated into the onboard logic. The
@@ -1647,8 +1750,12 @@ static void mos6522_q800_via1_reset_hold(Object *obj, ResetType type)
     ms->timers[1].frequency = VIA_TIMER_FREQ;
 
     ms->b = VIA1B_vADB_StateMask | VIA1B_vADBInt | VIA1B_vRTCEnb;
-    if (v1s->cuda) {
-        /* TIP and TACK idle high, no request pending */
+    if (v1s->cuda || v1s->egret) {
+        /* idle handshake lines, no request pending */
+        if (v1s->egret) {
+            ms->b &= ~(EGRET_SYS_SES | EGRET_VIA_FULL);
+            ms->b |= EGRET_XCVR_SES;
+        }
         timer_del(v1s->cuda_sr_timer);
         v1s->cuda_sr_due = 0;
         v1s->cuda_last_b = ms->b;
@@ -1661,7 +1768,7 @@ static void mos6522_q800_via1_reset_hold(Object *obj, ResetType type)
     }
 
     /* ADB/RTC; Cuda only polls once the host asks it to */
-    adb_set_autopoll_enabled(adb_bus, !v1s->cuda);
+    adb_set_autopoll_enabled(adb_bus, !v1s->cuda && !v1s->egret && v1s->adb);
     v1s->cmd = REG_EMPTY;
     v1s->alt = REG_EMPTY;
 
@@ -1691,7 +1798,7 @@ static void mos6522_q800_via1_realize(DeviceState *dev, Error **errp)
     qemu_get_timedate(&tm, 0);
     v1s->tick_offset = (uint32_t)mktimegm(&tm) + RTC_OFFSET;
 
-    if (v1s->cuda) {
+    if (v1s->cuda || v1s->egret) {
         adb_register_autopoll_callback(adb_bus, via1_cuda_adb_poll, v1s);
         v1s->cuda_sr_timer = timer_new_ns(QEMU_CLOCK_VIRTUAL,
                                           via1_cuda_sr_int, v1s);
@@ -1782,6 +1889,8 @@ static const Property mos6522_q800_via1_properties[] = {
     DEFINE_PROP_UINT8("cpuid", MOS6522Q800VIA1State, cpuid, VIA1A_CPUID_Q800),
     DEFINE_PROP_UINT8("porta-pullup", MOS6522Q800VIA1State, porta_pullup, 0),
     DEFINE_PROP_BOOL("cuda", MOS6522Q800VIA1State, cuda, false),
+    DEFINE_PROP_BOOL("egret", MOS6522Q800VIA1State, egret, false),
+    DEFINE_PROP_BOOL("adb", MOS6522Q800VIA1State, adb, true),
 };
 
 static void mos6522_q800_via1_class_init(ObjectClass *oc, const void *data)
@@ -1862,6 +1971,10 @@ static void mos6522_q800_via2_init(Object *obj)
                             VIA2_NUBUS_IRQ_NB);
 }
 
+static const Property mos6522_q800_via2_properties[] = {
+    DEFINE_PROP_UINT8("portb-pullup", MOS6522Q800VIA2State, portb_pullup, 0),
+};
+
 static const VMStateDescription vmstate_q800_via2 = {
     .name = "q800-via2",
     .version_id = 0,
@@ -1883,6 +1996,7 @@ static void mos6522_q800_via2_class_init(ObjectClass *oc, const void *data)
                                        NULL, &mdc->parent_phases);
     dc->vmsd = &vmstate_q800_via2;
     mdc->portB_write = mos6522_q800_via2_portB_write;
+    device_class_set_props(dc, mos6522_q800_via2_properties);
 }
 
 static const TypeInfo mos6522_q800_via2_type_info = {

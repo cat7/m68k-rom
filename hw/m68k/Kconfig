@@ -48,6 +48,14 @@ config Q700
     select MAC_QUADRA
     select ORWELL
 
+config Q900
+    bool
+    default y
+    depends on M68K
+    select MAC_QUADRA
+    select ORWELL
+    select MAC_IOP
+
 config LC475
     bool
     default y

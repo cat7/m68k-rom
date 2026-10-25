@@ -73,6 +73,7 @@
 #define ASC_BASE              (IO_BASE + 0x14000)
 #define IOSB_BASE             (IO_BASE + 0x18000)
 #define SWIM_BASE             (IO_BASE + 0x1E000)
+#define SCC_IOP_BASE          (IO_BASE + 0x0c000)
 
 #define SONIC_PROM_SIZE       0x1000
 
@@ -419,6 +420,9 @@ static void q800_machine_init(MachineState *machine)
     qdev_prop_set_uint8(DEVICE(&m->via1), "porta-pullup",
                         model->via1_porta_pullup);
     qdev_prop_set_bit(DEVICE(&m->via1), "cuda", model->cuda);
+    qdev_prop_set_bit(DEVICE(&m->via1), "egret", model->egret);
+    /* ADB is behind the SWIM IOP on IOP models */
+    qdev_prop_set_bit(DEVICE(&m->via1), "adb", !model->iop);
     dinfo = drive_get(IF_MTD, 0, 0);
     if (dinfo) {
         qdev_prop_set_drive(DEVICE(&m->via1), "drive",
@@ -435,21 +439,51 @@ static void q800_machine_init(MachineState *machine)
                           qdev_get_gpio_in_named(DEVICE(&m->glue),
                                                  "auxmode", 0));
 
-    adb_bus = qdev_get_child_bus(DEVICE(&m->via1), "adb.0");
-    dev = qdev_new(TYPE_ADB_KEYBOARD);
-    qdev_realize_and_unref(dev, adb_bus, &error_fatal);
-    dev = qdev_new(TYPE_ADB_MOUSE);
-    qdev_realize_and_unref(dev, adb_bus, &error_fatal);
-
     /* VIA 2 */
     object_initialize_child(OBJECT(machine), "via2", &m->via2,
                             TYPE_MOS6522_Q800_VIA2);
+    qdev_prop_set_uint8(DEVICE(&m->via2), "portb-pullup",
+                        model->via2_portb_pullup);
     sysbus = SYS_BUS_DEVICE(&m->via2);
     sysbus_realize(sysbus, &error_fatal);
     memory_region_add_subregion(&m->macio, VIA_BASE - IO_BASE + VIA_SIZE,
                                 sysbus_mmio_get_region(sysbus, 1));
     sysbus_connect_irq(sysbus, 0,
                        qdev_get_gpio_in(DEVICE(&m->glue), GLUE_IRQ_IN_VIA2));
+
+    if (model->iop) {
+        /*
+         * IOPs: the SCC one sits in front of the SCC (which Mac OS uses in
+         * bypass mode at the usual address), the SWIM one runs the floppy
+         * and ADB and interrupts through VIA2 CA2.
+         */
+        object_initialize_child(OBJECT(machine), "scc-iop", &m->scc_iop,
+                                TYPE_MAC_IOP);
+        qdev_prop_set_uint8(DEVICE(&m->scc_iop), "kind", MAC_IOP_SCC);
+        sysbus = SYS_BUS_DEVICE(&m->scc_iop);
+        sysbus_realize(sysbus, &error_fatal);
+        memory_region_add_subregion(&m->macio, SCC_IOP_BASE - IO_BASE,
+                                    sysbus_mmio_get_region(sysbus, 0));
+
+        object_initialize_child(OBJECT(machine), "swim-iop", &m->swim_iop,
+                                TYPE_MAC_IOP);
+        qdev_prop_set_uint8(DEVICE(&m->swim_iop), "kind", MAC_IOP_ISM);
+        sysbus = SYS_BUS_DEVICE(&m->swim_iop);
+        sysbus_realize(sysbus, &error_fatal);
+        memory_region_add_subregion(&m->macio, SWIM_BASE - IO_BASE,
+                                    sysbus_mmio_get_region(sysbus, 0));
+        sysbus_connect_irq(sysbus, 0,
+                           qemu_irq_invert(
+                               qdev_get_gpio_in(DEVICE(&m->via2),
+                                                VIA2_IRQ_SCSI_DATA_BIT)));
+        adb_bus = qdev_get_child_bus(DEVICE(&m->swim_iop), "adb.0");
+    } else {
+        adb_bus = qdev_get_child_bus(DEVICE(&m->via1), "adb.0");
+    }
+    dev = qdev_new(TYPE_ADB_KEYBOARD);
+    qdev_realize_and_unref(dev, adb_bus, &error_fatal);
+    dev = qdev_new(TYPE_ADB_MOUSE);
+    qdev_realize_and_unref(dev, adb_bus, &error_fatal);
 
     if (!model->no_sonic) {
         mac_quadra_init_sonic(m);
@@ -475,23 +509,30 @@ static void q800_machine_init(MachineState *machine)
     /* Logically OR both its IRQs together */
     object_initialize_child(OBJECT(machine), "escc_orgate", &m->escc_orgate,
                             TYPE_OR_IRQ);
-    object_property_set_int(OBJECT(&m->escc_orgate), "num-lines", 2,
-                            &error_fatal);
+    object_property_set_int(OBJECT(&m->escc_orgate), "num-lines",
+                            model->iop ? 3 : 2, &error_fatal);
     dev = DEVICE(&m->escc_orgate);
     qdev_realize(dev, NULL, &error_fatal);
     sysbus_connect_irq(sysbus, 0, qdev_get_gpio_in(dev, 0));
     sysbus_connect_irq(sysbus, 1, qdev_get_gpio_in(dev, 1));
+    if (model->iop) {
+        sysbus_connect_irq(SYS_BUS_DEVICE(&m->scc_iop), 0,
+                           qdev_get_gpio_in(dev, 2));
+    }
     qdev_connect_gpio_out(dev, 0,
                           qdev_get_gpio_in(DEVICE(&m->glue),
                                            GLUE_IRQ_IN_ESCC));
     memory_region_add_subregion(&m->macio, SCC_BASE - IO_BASE,
                                 sysbus_mmio_get_region(sysbus, 0));
 
-    /* Create alias for NetBSD */
-    memory_region_init_alias(&m->escc_alias, OBJECT(machine), "escc-alias",
-                             sysbus_mmio_get_region(sysbus, 0), 0, 0x8);
-    memory_region_add_subregion(&m->macio, SCC_BASE - IO_BASE - 0x20,
-                                &m->escc_alias);
+    if (!model->iop) {
+        /* Create alias for NetBSD */
+        memory_region_init_alias(&m->escc_alias, OBJECT(machine),
+                                 "escc-alias",
+                                 sysbus_mmio_get_region(sysbus, 0), 0, 0x8);
+        memory_region_add_subregion(&m->macio, SCC_BASE - IO_BASE - 0x20,
+                                    &m->escc_alias);
+    }
 
     /* SCSI */
 
@@ -513,15 +554,20 @@ static void q800_machine_init(MachineState *machine)
                            qdev_get_gpio_in(DEVICE(&m->via2),
                                                    VIA2_IRQ_SCSI_BIT)));
     if (model->scsi_drq_dafb) {
-        /* DRQ goes to VIA2 and to the DAFB (wired up with the video) */
+        /*
+         * DRQ goes to the DAFB (wired up with the video) and to VIA2 CA2,
+         * except on IOP models where CA2 is the SWIM IOP's interrupt
+         */
         object_initialize_child(OBJECT(machine), "scsi-drq-split",
                                 &m->scsi_drq_split, TYPE_SPLIT_IRQ);
         qdev_prop_set_uint32(DEVICE(&m->scsi_drq_split), "num-lines", 2);
         qdev_realize(DEVICE(&m->scsi_drq_split), NULL, &error_fatal);
-        qdev_connect_gpio_out(DEVICE(&m->scsi_drq_split), 0,
-                              qemu_irq_invert(
-                                  qdev_get_gpio_in(DEVICE(&m->via2),
-                                                   VIA2_IRQ_SCSI_DATA_BIT)));
+        if (!model->iop) {
+            qdev_connect_gpio_out(DEVICE(&m->scsi_drq_split), 0,
+                                  qemu_irq_invert(
+                                      qdev_get_gpio_in(DEVICE(&m->via2),
+                                                       VIA2_IRQ_SCSI_DATA_BIT)));
+        }
         sysbus_connect_irq(sysbus, 1,
                            qdev_get_gpio_in(DEVICE(&m->scsi_drq_split), 0));
     } else {
@@ -557,19 +603,21 @@ static void q800_machine_init(MachineState *machine)
                           qdev_get_gpio_in(DEVICE(&m->via2),
                                            VIA2_IRQ_ASC_BIT));
 
-    /* SWIM floppy controller */
+    /* SWIM floppy controller (behind the SWIM IOP on IOP models) */
 
-    object_initialize_child(OBJECT(machine), "swim", &m->swim2, TYPE_SWIM2);
-    qdev_prop_set_bit(DEVICE(&m->swim2), "swim1",
-                      model->floppy == MAC_FLOPPY_SWIM1);
-    sysbus = SYS_BUS_DEVICE(&m->swim2);
-    /* drive head select comes from VIA1 PA5 */
-    qdev_connect_gpio_out_named(DEVICE(&m->via1), "headsel", 0,
-                                qemu_allocate_irq(swim2_headsel,
-                                                  &m->swim2, 0));
-    sysbus_realize(sysbus, &error_fatal);
-    memory_region_add_subregion(&m->macio, SWIM_BASE - IO_BASE,
-                                sysbus_mmio_get_region(sysbus, 0));
+    if (!model->iop) {
+        object_initialize_child(OBJECT(machine), "swim", &m->swim2, TYPE_SWIM2);
+        qdev_prop_set_bit(DEVICE(&m->swim2), "swim1",
+                          model->floppy == MAC_FLOPPY_SWIM1);
+        sysbus = SYS_BUS_DEVICE(&m->swim2);
+        /* drive head select comes from VIA1 PA5 */
+        qdev_connect_gpio_out_named(DEVICE(&m->via1), "headsel", 0,
+                                    qemu_allocate_irq(swim2_headsel,
+                                                      &m->swim2, 0));
+        sysbus_realize(sysbus, &error_fatal);
+        memory_region_add_subregion(&m->macio, SWIM_BASE - IO_BASE,
+                                    sysbus_mmio_get_region(sysbus, 0));
+    }
 
     /* NuBus */
 

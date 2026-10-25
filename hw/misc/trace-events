@@ -480,3 +480,11 @@ restore_host_x86_igvm(void) ""
 # tt_atlantis_prcm.c
 tt_atlantis_prcm_read(uint32_t domain, uint64_t offset, uint64_t data) "domain 0x%02x offset 0x%" PRIx64 " data 0x%" PRIx64
 tt_atlantis_prcm_write(uint32_t domain, uint64_t offset, uint64_t data) "domain 0x%02x offset 0x%" PRIx64 " data 0x%" PRIx64
+
+# mac_iop.c
+mac_iop_read(int kind, uint64_t addr, uint64_t val, unsigned size) "iop%d addr=0x%"PRIx64" val=0x%"PRIx64" size=%u"
+mac_iop_write(int kind, uint64_t addr, uint64_t val, unsigned size) "iop%d addr=0x%"PRIx64" val=0x%"PRIx64" size=%u"
+mac_iop_run(int kind, int run) "iop%d run=%d"
+mac_iop_send(int kind, int chan, int b0, int b1, int b2, int b3) "iop%d send chan %d: %02x %02x %02x %02x"
+mac_iop_recv(int kind, int chan, int b0, int b1, int b2, int b3) "iop%d recv chan %d: %02x %02x %02x %02x"
+mac_iop_recv_done(int kind, int chan) "iop%d recv chan %d done"
