@@ -34,7 +34,6 @@
 #include "hw/core/or-irq.h"
 #include "hw/core/split-irq.h"
 #include "hw/scsi/esp.h"
-#include "hw/block/swim.h"
 #include "hw/block/swim2.h"
 #include "hw/nubus/mac-nubus-bridge.h"
 #include "hw/display/macfb.h"
@@ -55,7 +54,7 @@ typedef enum MacMemCtrl {
 } MacMemCtrl;
 
 typedef enum MacFloppyCtrl {
-    MAC_FLOPPY_SWIM,        /* original SWIM (IWM + ISM): Quadra 700/900 */
+    MAC_FLOPPY_SWIM1,       /* original SWIM (IWM + ISM): Quadra 700/900 */
     MAC_FLOPPY_SWIM2,       /* SWIM2 (ISM only): Quadra 800 */
 } MacFloppyCtrl;
 
@@ -98,7 +97,6 @@ struct MacQuadraMachineState {
     OrIRQState escc_orgate;
     SplitIRQ scsi_drq_split;
     SysBusESPState esp;
-    Swim swim;
     SWIM2State swim2;
     MacNubusBridge mac_nubus_bridge;
     MacfbNubusState macfb;

@@ -25,7 +25,6 @@ config MAC_QUADRA
     select MAC_VIA
     select NUBUS
     select MACFB
-    select SWIM
     select SWIM2
     select ESCC
     select ESP

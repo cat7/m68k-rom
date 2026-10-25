@@ -183,9 +183,36 @@ static SonyDrive *swim2_active_drive(SWIM2State *const ctrl)
     }
 }
 
+/* IWM latches (SWIM1 in IWM mode): address bits 4-1 pick, bit 0 sets */
+#define IWM_LATCH_MOTORON   4
+#define IWM_LATCH_DRIVESEL  5
+#define IWM_LATCH_Q6        6
+#define IWM_LATCH_Q7        7
+
+static void swim1_iwm_apply_drive_lines(SWIM2State *const ctrl)
+{
+    const bool motor = ctrl->iwm_latches & BIT(IWM_LATCH_MOTORON);
+    const uint8_t selected = (ctrl->iwm_latches & BIT(IWM_LATCH_DRIVESEL)) ?
+                             1 : 0;
+    const bool head = (ctrl->mode_reg & SWIM2_MODE_SIDE);
+
+    for (uint8_t i = 0; i < SWIM2_MAX_FD; i++) {
+        if (ctrl->drives[i]) {
+            sony_drive_set_inputs(&ctrl->drives[i]->sony,
+                                  ctrl->iwm_latches & 0xf, head,
+                                  motor && i == selected);
+        }
+    }
+}
+
 static void swim2_apply_drive_lines(SWIM2State *const ctrl)
 {
     SonyDrive *const active = swim2_active_drive(ctrl);
+
+    if (ctrl->iwm_mode) {
+        swim1_iwm_apply_drive_lines(ctrl);
+        return;
+    }
 
     for (uint8_t i = 0; i < SWIM2_MAX_FD; i++) {
         SWIM2Drive *const entry = ctrl->drives[i];
@@ -271,6 +298,14 @@ static void swim2_update_mode(SWIM2State *const ctrl, const uint8_t mask,
         ctrl->mode_reg |= mask;
     } else {
         ctrl->mode_reg &= ~mask;
+        if (ctrl->swim1 && (mask & SWIM2_MODE_ALWAYS1)) {
+            /* On the SWIM, clearing bit 6 switches back to IWM mode */
+            ctrl->iwm_mode = true;
+            ctrl->iwm_latches = 0;
+            ctrl->iwm_switch = 0;
+            swim2_apply_drive_lines(ctrl);
+            return;
+        }
         ctrl->mode_reg |= SWIM2_MODE_ALWAYS1;
     }
 
@@ -317,8 +352,24 @@ static void swim2_handle_setup_write(SWIM2State *const ctrl,
  * them.
  */
 static void swim2_handle_parameter_write(SWIM2State *const ctrl,
-                                         const uint8_t value)
+                                         uint8_t value)
 {
+    if (ctrl->swim1) {
+        /*
+         * Inferred from the Quadra 700 ROM power-on test (not from chip
+         * documentation): bit 1 of parameter 14 only sticks when bit 1 of
+         * parameter 13 is set. The test writes 0xdd, 0xee to parameters
+         * 13, 14 and expects 0xec back, yet expects any other value
+         * written to all parameters to read back unchanged.
+         */
+        if (ctrl->parameter_index == 14 &&
+            !(ctrl->parameter_data[13] & 0x02)) {
+            value &= ~0x02;
+        }
+        ctrl->parameter_data[ctrl->parameter_index] = value;
+        ctrl->parameter_index = (ctrl->parameter_index + 1) & 0xf;
+        return;
+    }
     ctrl->parameter_data[ctrl->parameter_index] = value;
     ctrl->parameter_index = (ctrl->parameter_index + 1) & 0x3;
 }
@@ -326,6 +377,13 @@ static void swim2_handle_parameter_write(SWIM2State *const ctrl,
 static uint8_t swim2_handle_parameter_read(SWIM2State *const ctrl)
 {
     uint8_t value;
+
+    if (ctrl->swim1) {
+        /* The SWIM has 16 parameter registers */
+        value = ctrl->parameter_data[ctrl->parameter_index];
+        ctrl->parameter_index = (ctrl->parameter_index + 1) & 0xf;
+        return value;
+    }
 
     /* Return 0 for parameters 1 and 3, as A/UX expects for a SWIM2. */
     if (ctrl->parameter_index == 1 || ctrl->parameter_index == 3) {
@@ -386,12 +444,94 @@ static uint8_t swim2_handle_handshake_read(SWIM2State *const ctrl)
     return value;
 }
 
+/*
+ * SWIM1 in IWM mode: each access sets or clears a latch; Q7/Q6 then pick
+ * what a read returns or where a write goes.
+ */
+static uint8_t swim1_iwm_access(SWIM2State *const ctrl, const hwaddr addr,
+                                const bool is_write, const uint8_t data)
+{
+    const uint8_t reg = (addr >> SWIM2_REG_SHIFT) & 0xf;
+    const uint8_t latch = reg >> 1;
+    uint8_t value = 0xff;
+
+    if (reg & 1) {
+        ctrl->iwm_latches |= BIT(latch);
+    } else {
+        ctrl->iwm_latches &= ~BIT(latch);
+    }
+    swim1_iwm_apply_drive_lines(ctrl);
+
+    /* Q6/Q7 as they are after this access */
+    const bool nq6 = ctrl->iwm_latches & BIT(IWM_LATCH_Q6);
+    const bool nq7 = ctrl->iwm_latches & BIT(IWM_LATCH_Q7);
+    const bool nmotor = ctrl->iwm_latches & BIT(IWM_LATCH_MOTORON);
+
+    if (is_write) {
+        if (nq6 && nq7 && !nmotor) {
+            /* mode register; 1,0,1,1 in bit 6 switches to ISM mode */
+            const bool ism_bit = data & SWIM2_MODE_ALWAYS1;
+
+            ctrl->iwm_mode_reg = data;
+            switch (ctrl->iwm_switch) {
+            case 0:
+            case 2:
+            case 3:
+                ctrl->iwm_switch = ism_bit ? ctrl->iwm_switch + 1 : 0;
+                break;
+            case 1:
+                ctrl->iwm_switch = ism_bit ? 1 : 2;
+                break;
+            }
+            if (ctrl->iwm_switch == 4) {
+                ctrl->iwm_switch = 0;
+                ctrl->iwm_mode = false;
+                ctrl->mode_reg = SWIM2_MODE_ALWAYS1 |
+                                 (ctrl->mode_reg & SWIM2_MODE_SIDE);
+                ctrl->parameter_index = 0;
+                swim2_apply_drive_lines(ctrl);
+            }
+        }
+        /* GCR data writes through IWM mode are not emulated */
+        return 0;
+    }
+
+    if (!nq7 && nq6) {
+        /* status: sense, enabled, mode bits */
+        SonyDrive *drive = NULL;
+        const uint8_t sel = (ctrl->iwm_latches & BIT(IWM_LATCH_DRIVESEL)) ?
+                            1 : 0;
+
+        if (ctrl->drives[sel]) {
+            drive = &ctrl->drives[sel]->sony;
+        }
+        value = ctrl->iwm_mode_reg & 0x1f;
+        if (!drive || sony_drive_read_sense(drive)) {
+            value |= 0x80;
+        }
+        if (nmotor) {
+            value |= 0x20;
+        }
+    } else if (nq7 && !nq6) {
+        /* write handshake: ready, no underrun */
+        value = 0xc0;
+    } else {
+        /* GCR data reads through IWM mode are not emulated */
+        value = nq7 ? 0xff : 0x00;
+    }
+    return value;
+}
+
 static uint64_t swim2_read(void *const opaque, const hwaddr addr,
                            const unsigned int size)
 {
     SWIM2State *const ctrl = SWIM2(opaque);
     const uint8_t reg = (addr >> SWIM2_REG_SHIFT) & 0x7;
     uint8_t value = 0xff;
+
+    if (ctrl->iwm_mode) {
+        return swim1_iwm_access(ctrl, addr, false, 0);
+    }
 
     switch (reg) {
     case SWIM2_REG_DATA: {
@@ -470,6 +610,11 @@ static void swim2_write(void *const opaque, const hwaddr addr,
     SWIM2State *const ctrl = SWIM2(opaque);
     const uint8_t reg = (addr >> SWIM2_REG_SHIFT) & 0x7;
     const uint8_t value = data & 0xff;
+
+    if (ctrl->iwm_mode) {
+        swim1_iwm_access(ctrl, addr, true, value);
+        return;
+    }
 
     switch (reg) {
     case SWIM2_REG_DATA:
@@ -620,6 +765,13 @@ static void swim2_init(Object *const obj)
         ctrl->drives[i] = NULL;
     }
 
+    fifo32_create(&ctrl->fifo, 2);
+}
+
+static void swim2_reset_hold(Object *const obj, ResetType type)
+{
+    SWIM2State *const ctrl = SWIM2(obj);
+
     memset(ctrl->parameter_data, 0, sizeof ctrl->parameter_data);
     ctrl->parameter_index = 0;
     ctrl->phase_reg = 0;
@@ -627,7 +779,11 @@ static void swim2_init(Object *const obj)
     ctrl->mode_reg = SWIM2_MODE_ALWAYS1;
     ctrl->error_reg = 0;
     ctrl->wait_for_mark = false;
-    fifo32_create(&ctrl->fifo, 2);
+    ctrl->did_handshake = false;
+    ctrl->iwm_mode = ctrl->swim1;
+    ctrl->iwm_latches = 0;
+    ctrl->iwm_mode_reg = 0;
+    ctrl->iwm_switch = 0;
     swim2_fifo_clear(ctrl);
 }
 
@@ -660,8 +816,15 @@ static void swim2_realize(DeviceState *const dev, Error **const errp)
 static void swim2_class_init(ObjectClass *const oc, const void *const opaque)
 {
     DeviceClass *const dc = DEVICE_CLASS(oc);
+    ResettableClass *const rc = RESETTABLE_CLASS(oc);
+    static const Property swim2_properties[] = {
+        DEFINE_PROP_BOOL("swim1", SWIM2State, swim1, false),
+    };
+
     dc->realize = swim2_realize;
     dc->desc = "Apple Macintosh SWIM2 floppy diskette drive controller";
+    rc->phases.hold = swim2_reset_hold;
+    device_class_set_props(dc, swim2_properties);
 }
 
 static void swim2_bus_class_init(ObjectClass *const oc,

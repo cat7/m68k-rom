@@ -47,7 +47,6 @@
 #include "hw/audio/asc.h"
 #include "hw/nubus/mac-nubus-bridge.h"
 #include "hw/display/macfb.h"
-#include "hw/block/swim.h"
 #include "net/net.h"
 #include "net/util.h"
 #include "qapi/error.h"
@@ -542,24 +541,14 @@ static void q800_machine_init(MachineState *machine)
 
     /* SWIM floppy controller */
 
-    switch (model->floppy) {
-    case MAC_FLOPPY_SWIM:
-        object_initialize_child(OBJECT(machine), "swim", &m->swim,
-                                TYPE_SWIM);
-        sysbus = SYS_BUS_DEVICE(&m->swim);
-        break;
-    case MAC_FLOPPY_SWIM2:
-        object_initialize_child(OBJECT(machine), "swim", &m->swim2,
-                                TYPE_SWIM2);
-        sysbus = SYS_BUS_DEVICE(&m->swim2);
-        /* drive head select comes from VIA1 PA5 */
-        qdev_connect_gpio_out_named(DEVICE(&m->via1), "headsel", 0,
-                                    qemu_allocate_irq(swim2_headsel,
-                                                      &m->swim2, 0));
-        break;
-    default:
-        g_assert_not_reached();
-    }
+    object_initialize_child(OBJECT(machine), "swim", &m->swim2, TYPE_SWIM2);
+    qdev_prop_set_bit(DEVICE(&m->swim2), "swim1",
+                      model->floppy == MAC_FLOPPY_SWIM1);
+    sysbus = SYS_BUS_DEVICE(&m->swim2);
+    /* drive head select comes from VIA1 PA5 */
+    qdev_connect_gpio_out_named(DEVICE(&m->via1), "headsel", 0,
+                                qemu_allocate_irq(swim2_headsel,
+                                                  &m->swim2, 0));
     sysbus_realize(sysbus, &error_fatal);
     memory_region_add_subregion(&m->macio, SWIM_BASE - IO_BASE,
                                 sysbus_mmio_get_region(sysbus, 0));

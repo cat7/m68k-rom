@@ -43,7 +43,7 @@ struct SWIM2State {
 
     SWIM2Drive *drives[SWIM2_MAX_FD];
 
-    uint8_t parameter_data[4];
+    uint8_t parameter_data[16];
     uint8_t parameter_index;
     uint8_t phase_reg;
     uint8_t setup_reg;
@@ -53,6 +53,16 @@ struct SWIM2State {
     bool wait_for_mark;
 
     Fifo32 fifo;
+
+    /*
+     * Original SWIM (Quadra 700/900): starts in IWM mode, has 16 parameter
+     * registers and switches between IWM and ISM register sets.
+     */
+    bool swim1;
+    bool iwm_mode;
+    uint8_t iwm_latches;
+    uint8_t iwm_mode_reg;
+    uint8_t iwm_switch;
 };
 
 void swim2_set_sel(SWIM2State *ctrl, bool sel);
