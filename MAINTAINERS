@@ -1438,7 +1438,10 @@ F: tests/functional/m68k/test_nextcube.py
 q800
 M: Laurent Vivier <laurent@vivier.eu>
 S: Maintained
+F: hw/m68k/mac-quadra.c
 F: hw/m68k/q800.c
+F: hw/m68k/q700.c
+F: hw/misc/orwell.c
 F: hw/m68k/q800-glue.c
 F: hw/misc/mac_via.c
 F: hw/nubus/*
@@ -1454,10 +1457,11 @@ F: include/hw/misc/mac_via.h
 F: include/hw/nubus/*
 F: include/hw/display/macfb.h
 F: include/hw/block/swim.h
-F: include/hw/m68k/q800.h
+F: include/hw/m68k/mac-quadra.h
 F: include/hw/m68k/q800-glue.h
 F: include/hw/misc/djmemc.h
 F: include/hw/misc/iosb.h
+F: include/hw/misc/orwell.h
 F: include/hw/audio/asc.h
 F: tests/functional/m68k/test_q800.py
 

@@ -20,10 +20,8 @@ config NEXTCUBE
     select ESCC
     select EMPTY_SLOT
 
-config Q800
+config MAC_QUADRA
     bool
-    default y
-    depends on M68K
     select MAC_VIA
     select NUBUS
     select MACFB
@@ -32,9 +30,22 @@ config Q800
     select ESP
     select DP8393X
     select OR_IRQ
+    select ASC
+
+config Q800
+    bool
+    default y
+    depends on M68K
+    select MAC_QUADRA
     select DJMEMC
     select IOSB
-    select ASC
+
+config Q700
+    bool
+    default y
+    depends on M68K
+    select MAC_QUADRA
+    select ORWELL
 
 config M68K_VIRT
     bool

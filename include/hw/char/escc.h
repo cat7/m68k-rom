@@ -49,6 +49,12 @@ typedef struct ESCCChannelState {
     int sunmouse_dx;
     int sunmouse_dy;
     int sunmouse_buttons;
+
+    /* Baud rate generator zero count (external/status) interrupt */
+    QEMUTimer *brg_timer;
+    uint32_t brg_freq;      /* PCLK */
+    uint32_t rtxc_freq;
+    uint8_t zcint;
 } ESCCChannelState;
 
 struct ESCCState {
@@ -60,6 +66,7 @@ struct ESCCState {
     MemoryRegion mmio;
     uint32_t disabled;
     uint32_t frequency;
+    uint32_t pclk;
 };
 
 #endif

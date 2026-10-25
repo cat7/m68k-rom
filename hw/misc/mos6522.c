@@ -175,6 +175,8 @@ static void set_counter(MOS6522State *s, MOS6522Timer *ti, unsigned int val)
     trace_mos6522_set_counter(1 + ti->index, val);
     ti->load_time = get_load_time(s, ti);
     ti->counter_value = val;
+    /* (re)arm a one-shot timer */
+    ti->next_irq_time = 0;
     if (ti->index == 0) {
         mos6522_timer1_update(s, ti, ti->load_time);
     } else {
@@ -228,18 +230,32 @@ static void mos6522_timer1_update(MOS6522State *s, MOS6522Timer *ti,
     if (!ti->timer) {
         return;
     }
+    /* In one-shot mode T1 interrupts once per T1CH write */
+    if ((s->acr & T1MODE) != T1MODE_CONT && ti->next_irq_time == INT64_MAX) {
+        timer_del(ti->timer);
+        return;
+    }
     ti->next_irq_time = get_next_irq_time(s, ti, current_time);
-    if ((s->ier & T1_INT) == 0 || (s->acr & T1MODE) != T1MODE_CONT) {
+    if ((s->ier & T1_INT) == 0) {
         timer_del(ti->timer);
     } else {
         timer_mod(ti->timer, ti->next_irq_time);
     }
 }
 
+/*
+ * T2 is a one-shot: it interrupts once when it counts down to zero and
+ * then keeps counting without interrupting until T2CH is written again.
+ * Once fired, next_irq_time is INT64_MAX.
+ */
 static void mos6522_timer2_update(MOS6522State *s, MOS6522Timer *ti,
                                  int64_t current_time)
 {
     if (!ti->timer) {
+        return;
+    }
+    if (ti->next_irq_time == INT64_MAX) {
+        timer_del(ti->timer);
         return;
     }
     ti->next_irq_time = get_next_irq_time(s, ti, current_time);
@@ -255,7 +271,11 @@ static void mos6522_timer1(void *opaque)
     MOS6522State *s = opaque;
     MOS6522Timer *ti = &s->timers[0];
 
-    mos6522_timer1_update(s, ti, ti->next_irq_time);
+    if ((s->acr & T1MODE) == T1MODE_CONT) {
+        mos6522_timer1_update(s, ti, ti->next_irq_time);
+    } else {
+        ti->next_irq_time = INT64_MAX;
+    }
     s->ifr |= T1_INT;
     mos6522_update_irq(s);
 }
@@ -265,7 +285,7 @@ static void mos6522_timer2(void *opaque)
     MOS6522State *s = opaque;
     MOS6522Timer *ti = &s->timers[1];
 
-    mos6522_timer2_update(s, ti, ti->next_irq_time);
+    ti->next_irq_time = INT64_MAX;
     s->ifr |= T2_INT;
     mos6522_update_irq(s);
 }
@@ -301,11 +321,17 @@ uint64_t mos6522_read(void *opaque, hwaddr addr, unsigned size)
     int64_t now = qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL);
 
     if (now >= s->timers[0].next_irq_time) {
-        mos6522_timer1_update(s, &s->timers[0], now);
+        if ((s->acr & T1MODE) == T1MODE_CONT) {
+            mos6522_timer1_update(s, &s->timers[0], now);
+        } else {
+            s->timers[0].next_irq_time = INT64_MAX;
+            timer_del(s->timers[0].timer);
+        }
         s->ifr |= T1_INT;
     }
     if (now >= s->timers[1].next_irq_time) {
-        mos6522_timer2_update(s, &s->timers[1], now);
+        s->timers[1].next_irq_time = INT64_MAX;
+        timer_del(s->timers[1].timer);
         s->ifr |= T2_INT;
     }
     switch (addr) {

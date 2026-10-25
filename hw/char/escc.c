@@ -34,6 +34,7 @@
 #include "ui/console.h"
 
 #include "qemu/cutils.h"
+#include "qemu/timer.h"
 #include "trace.h"
 
 /*
@@ -84,6 +85,7 @@
 #define CMD_PTR_MASK   0x07
 #define CMD_CMD_MASK   0x38
 #define CMD_HI         0x08
+#define CMD_RES_EXT    0x10
 #define CMD_CLR_TXINT  0x28
 #define CMD_CLR_IUS    0x38
 #define W_INTR    1
@@ -144,6 +146,7 @@
 #define MISC2_PLLCMD1  0x40
 #define MISC2_PLLCMD2  0x80
 #define W_EXTINT 15
+#define EXTINT_ZCIE    0x02
 #define EXTINT_DCD     0x08
 #define EXTINT_SYNCINT 0x10
 #define EXTINT_CTSINT  0x20
@@ -263,8 +266,10 @@ static int escc_update_irq_chn(ESCCChannelState *s)
             s->rxint == 1) ||
         /* rx ints enabled, pending */
         ((s->wregs[W_EXTINT] & EXTINT_BRKINT) &&
-            (s->rregs[R_STATUS] & STATUS_BRK)))) {
+            (s->rregs[R_STATUS] & STATUS_BRK)) ||
         /* break int e&p */
+        ((s->wregs[W_INTR] & INTR_INTALL) && s->zcint))) {
+        /* zero count int e&p */
         return 1;
     }
     return 0;
@@ -281,9 +286,75 @@ static void escc_update_irq(ESCCChannelState *s)
     qemu_set_irq(s->irq, irq);
 }
 
+/*
+ * Baud rate generator: when enabled with zero count interrupts on, it
+ * raises an external/status interrupt each time the counter reaches zero,
+ * i.e. every (time constant + 2) input clocks. The input is PCLK or RTxC
+ * depending on WR14.
+ */
+static void escc_brg_update(ESCCChannelState *s)
+{
+    uint32_t tc;
+    int64_t period;
+
+    if (!s->brg_timer || !s->brg_freq) {
+        return;
+    }
+    if (!(s->wregs[W_MISC2] & MISC2_BRG_EN) ||
+        !(s->wregs[W_EXTINT] & EXTINT_ZCIE) ||
+        !(s->wregs[W_INTR] & INTR_INTALL)) {
+        timer_del(s->brg_timer);
+        return;
+    }
+    if (timer_pending(s->brg_timer)) {
+        return;
+    }
+    tc = s->wregs[W_BRGLO] | (s->wregs[W_BRGHI] << 8);
+    period = muldiv64(tc + 2, NANOSECONDS_PER_SECOND,
+                      (s->wregs[W_MISC2] & MISC2_BRG_SRC) ? s->brg_freq
+                                                          : s->rtxc_freq);
+    timer_mod(s->brg_timer, qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL) + period);
+}
+
+static void escc_brg_zero_count(void *opaque)
+{
+    ESCCChannelState *s = opaque;
+    bool hi = s->wregs[W_MINTR] & MINTR_STATUSHI;
+
+    s->zcint = 1;
+    s->rregs[R_STATUS] |= STATUS_ZERO;
+    if (!s->rxint && !s->txint) {
+        if (s->chn == escc_chn_a) {
+            s->rregs[R_INTR] |= INTR_EXTINTA;
+            s->otherchn->rregs[R_IVEC] = hi ? 0x50 : 0x0a;
+        } else {
+            s->otherchn->rregs[R_INTR] |= INTR_EXTINTB;
+            s->rregs[R_IVEC] = hi ? 0x40 : 0x02;
+        }
+    }
+    escc_update_irq(s);
+    escc_brg_update(s);
+}
+
+static void escc_reset_ext(ESCCChannelState *s)
+{
+    s->zcint = 0;
+    s->rregs[R_STATUS] &= ~STATUS_ZERO;
+    if (s->chn == escc_chn_a) {
+        s->rregs[R_INTR] &= ~INTR_EXTINTA;
+    } else {
+        s->otherchn->rregs[R_INTR] &= ~INTR_EXTINTB;
+    }
+    escc_update_irq(s);
+}
+
 static void escc_reset_chn(ESCCChannelState *s)
 {
     s->reg = 0;
+    s->zcint = 0;
+    if (s->brg_timer) {
+        timer_del(s->brg_timer);
+    }
     s->rx = s->tx = 0;
     s->rxint = s->txint = 0;
     s->rxint_under_svc = s->txint_under_svc = 0;
@@ -563,6 +634,9 @@ static void escc_mem_write(void *opaque, hwaddr addr,
             case CMD_CLR_TXINT:
                 clr_txint(s);
                 break;
+            case CMD_RES_EXT:
+                escc_reset_ext(s);
+                break;
             case CMD_CLR_IUS:
                 if (s->rxint_under_svc) {
                     s->rxint_under_svc = 0;
@@ -584,11 +658,19 @@ static void escc_mem_write(void *opaque, hwaddr addr,
                 s->rregs[R_STATUS] |= STATUS_SYNC;
             }
             break;
-        case W_INTR ... W_IVEC:
+        case W_IVEC:
+            /* WR2 is a single register shared by both channels */
+            s->wregs[W_IVEC] = val;
+            s->otherchn->wregs[W_IVEC] = val;
+            break;
         case W_SYNC1 ... W_TXBUF:
         case W_MISC1 ... W_CLOCK:
+            s->wregs[s->reg] = val;
+            break;
+        case W_INTR:
         case W_MISC2 ... W_EXTINT:
             s->wregs[s->reg] = val;
+            escc_brg_update(s);
             break;
         case W_TXCTRL1:
             s->wregs[s->reg] = val;
@@ -614,6 +696,7 @@ static void escc_mem_write(void *opaque, hwaddr addr,
             s->wregs[s->reg] = val;
             s->rregs[s->reg] = val;
             escc_update_parameters(s);
+            escc_brg_update(s);
             break;
         case W_MINTR:
             switch (val & MINTR_RST_MASK) {
@@ -676,6 +759,24 @@ static void escc_mem_write(void *opaque, hwaddr addr,
     }
 }
 
+/*
+ * RR2: channel A returns the vector as written to WR2, channel B returns
+ * it with the current interrupt status in bits 3-1 (or 6-4 if WR9 selects
+ * status high).
+ */
+static uint8_t escc_read_ivec(ESCCChannelState *s)
+{
+    uint8_t vec = s->wregs[W_IVEC];
+
+    if (s->chn == escc_chn_a) {
+        return vec;
+    }
+    if (s->wregs[W_MINTR] & MINTR_STATUSHI) {
+        return (vec & ~0x70) | s->rregs[R_IVEC];
+    }
+    return (vec & ~0x0e) | s->rregs[R_IVEC];
+}
+
 static uint64_t escc_mem_read(void *opaque, hwaddr addr,
                               unsigned size)
 {
@@ -690,8 +791,8 @@ static uint64_t escc_mem_read(void *opaque, hwaddr addr,
     s = &serial->chn[channel];
     switch (saddr) {
     case SERIAL_CTRL:
-        trace_escc_mem_readb_ctrl(CHN_C(s), s->reg, s->rregs[s->reg]);
-        ret = s->rregs[s->reg];
+        ret = s->reg == R_IVEC ? escc_read_ivec(s) : s->rregs[s->reg];
+        trace_escc_mem_readb_ctrl(CHN_C(s), s->reg, ret);
         s->reg = 0;
         return ret;
     case SERIAL_DATA:
@@ -764,6 +865,25 @@ static void serial_event(void *opaque, QEMUChrEvent event)
     }
 }
 
+static bool escc_chn_brg_needed(void *opaque)
+{
+    ESCCChannelState *s = opaque;
+
+    return s->zcint || (s->brg_timer && timer_pending(s->brg_timer));
+}
+
+static const VMStateDescription vmstate_escc_chn_brg = {
+    .name = "escc_chn/brg",
+    .version_id = 1,
+    .minimum_version_id = 1,
+    .needed = escc_chn_brg_needed,
+    .fields = (const VMStateField[]) {
+        VMSTATE_UINT8(zcint, ESCCChannelState),
+        VMSTATE_TIMER_PTR(brg_timer, ESCCChannelState),
+        VMSTATE_END_OF_LIST()
+    }
+};
+
 static const VMStateDescription vmstate_escc_chn = {
     .name = "escc_chn",
     .version_id = 2,
@@ -780,6 +900,10 @@ static const VMStateDescription vmstate_escc_chn = {
         VMSTATE_BUFFER(wregs, ESCCChannelState),
         VMSTATE_BUFFER(rregs, ESCCChannelState),
         VMSTATE_END_OF_LIST()
+    },
+    .subsections = (const VMStateDescription * const []) {
+        &vmstate_escc_chn_brg,
+        NULL
     }
 };
 
@@ -1066,6 +1190,10 @@ static void escc_realize(DeviceState *dev, Error **errp)
                           ESCC_SIZE << s->it_shift);
 
     for (i = 0; i < 2; i++) {
+        s->chn[i].brg_freq = s->pclk ?: s->frequency;
+        s->chn[i].rtxc_freq = s->frequency;
+        s->chn[i].brg_timer = timer_new_ns(QEMU_CLOCK_VIRTUAL,
+                                           escc_brg_zero_count, &s->chn[i]);
         if (qemu_chr_fe_backend_connected(&s->chn[i].chr)) {
             s->chn[i].clock = s->frequency / 2;
             qemu_chr_fe_set_handlers(&s->chn[i].chr, serial_can_receive,
@@ -1086,6 +1214,8 @@ static void escc_realize(DeviceState *dev, Error **errp)
 
 static const Property escc_properties[] = {
     DEFINE_PROP_UINT32("frequency", ESCCState, frequency,   0),
+    /* PCLK, used by the baud rate generator; 0 means same as frequency */
+    DEFINE_PROP_UINT32("pclk",      ESCCState, pclk,        0),
     DEFINE_PROP_UINT32("it_shift",  ESCCState, it_shift,    0),
     DEFINE_PROP_BOOL("bit_swap",    ESCCState, bit_swap,    false),
     DEFINE_PROP_UINT32("disabled",  ESCCState, disabled,    0),

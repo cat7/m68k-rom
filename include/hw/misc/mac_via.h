@@ -18,6 +18,15 @@
 
 #define VIA_SIZE   0x2000
 
+/* Machine ID bits on VIA1 port A */
+#define VIA1A_CPUID0    0x02    /* CPU id bit 0 on RBV, others */
+#define VIA1A_CPUID1    0x04    /* CPU id bit 0 on RBV, others */
+#define VIA1A_CPUID2    0x10    /* CPU id bit 0 on RBV, others */
+#define VIA1A_CPUID3    0x40    /* CPU id bit 0 on RBV, others */
+#define VIA1A_CPUID_MASK (VIA1A_CPUID0 | VIA1A_CPUID1 | \
+                          VIA1A_CPUID2 | VIA1A_CPUID3)
+#define VIA1A_CPUID_Q800 (VIA1A_CPUID0 | VIA1A_CPUID2)
+
 /* VIA 1 */
 #define VIA1_IRQ_ONE_SECOND_BIT CA2_INT_BIT
 #define VIA1_IRQ_60HZ_BIT       CA1_INT_BIT
@@ -43,6 +52,9 @@ struct MOS6522Q800VIA1State {
 
     qemu_irq auxmode_irq;
     uint8_t last_b;
+
+    /* Machine ID bits returned on port A (VIA1A_CPUID_MASK) */
+    uint8_t cpuid;
 
     /* RTC */
     uint8_t PRAM[256];

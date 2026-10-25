@@ -111,13 +111,6 @@
  * inputs, these bits will read 0.
  */
 #define VIA1A_vVolume   0x07    /* Audio volume mask for PWM */
-#define VIA1A_CPUID0    0x02    /* CPU id bit 0 on RBV, others */
-#define VIA1A_CPUID1    0x04    /* CPU id bit 0 on RBV, others */
-#define VIA1A_CPUID2    0x10    /* CPU id bit 0 on RBV, others */
-#define VIA1A_CPUID3    0x40    /* CPU id bit 0 on RBV, others */
-#define VIA1A_CPUID_MASK (VIA1A_CPUID0 | VIA1A_CPUID1 | \
-                          VIA1A_CPUID2 | VIA1A_CPUID3)
-#define VIA1A_CPUID_Q800 (VIA1A_CPUID0 | VIA1A_CPUID2)
 
 /*
  * Info on VIA1B is from Macintosh Family Hardware & MkLinux.
@@ -1041,8 +1034,8 @@ static uint64_t mos6522_q800_via1_read(void *opaque, hwaddr addr, unsigned size)
     switch (addr) {
     case VIA_REG_A:
     case VIA_REG_ANH:
-        /* Quadra 800 Id */
-        ret = (ret & ~VIA1A_CPUID_MASK) | VIA1A_CPUID_Q800;
+        /* Machine ID bits, set by the board */
+        ret = (ret & ~VIA1A_CPUID_MASK) | (s->cpuid & VIA1A_CPUID_MASK);
         break;
     case VIA_REG_T2CH:
         if (s->timer_hack_state == 6) {
@@ -1324,6 +1317,7 @@ static const VMStateDescription vmstate_q800_via1 = {
 
 static const Property mos6522_q800_via1_properties[] = {
     DEFINE_PROP_DRIVE("drive", MOS6522Q800VIA1State, blk),
+    DEFINE_PROP_UINT8("cpuid", MOS6522Q800VIA1State, cpuid, VIA1A_CPUID_Q800),
 };
 
 static void mos6522_q800_via1_class_init(ObjectClass *oc, const void *data)

@@ -20,8 +20,8 @@
  * THE SOFTWARE.
  */
 
-#ifndef HW_Q800_H
-#define HW_Q800_H
+#ifndef HW_M68K_MAC_QUADRA_H
+#define HW_M68K_MAC_QUADRA_H
 
 #include "hw/core/boards.h"
 #include "qom/object.h"
@@ -38,13 +38,41 @@
 #include "hw/display/macfb.h"
 #include "hw/misc/djmemc.h"
 #include "hw/misc/iosb.h"
+#include "hw/misc/orwell.h"
 #include "hw/audio/asc.h"
 
 /*
- * The main Q800 machine
+ * 68040 Macintosh Quadra family. Each model (q800, q700, ...) is a
+ * subclass of the abstract TYPE_MAC_QUADRA_MACHINE that only selects a
+ * MacQuadraModel describing how it differs from the others.
  */
 
-struct Q800MachineState {
+typedef enum MacMemCtrl {
+    MAC_MEMCTRL_DJMEMC,     /* djMEMC + IOSB: Quadra 800, Centris 610/650 */
+    MAC_MEMCTRL_ORWELL,     /* Orwell: Quadra 700/900/950 */
+} MacMemCtrl;
+
+typedef struct MacQuadraModel {
+    const char *desc;
+    const char *rom_filename;     /* default for -bios */
+    uint32_t bootinfo_model;      /* Gestalt ID passed to Linux */
+    uint8_t via1_cpuid;           /* ID bits on VIA1 port A */
+    MacMemCtrl memctrl;
+    bool has_machine_id_reg;      /* ID longword at 0x5ffffffc */
+    bool default_easc;
+    hwaddr esp_base;
+    hwaddr esp_pdma;
+    uint32_t nubus_slots;         /* NuBus slot-available-mask */
+    ram_addr_t max_ram_size;
+} MacQuadraModel;
+
+struct MacQuadraMachineClass {
+    MachineClass parent_class;
+
+    const MacQuadraModel *model;
+};
+
+struct MacQuadraMachineState {
     MachineState parent_obj;
 
     bool easc;
@@ -64,6 +92,7 @@ struct Q800MachineState {
     MacfbNubusState macfb;
     DJMEMCState djmemc;
     IOSBState iosb;
+    OrwellState orwell;
     ASCState asc;
     MemoryRegion ramio;
     MemoryRegion macio;
@@ -72,7 +101,17 @@ struct Q800MachineState {
     MemoryRegion escc_alias;
 };
 
+#define TYPE_MAC_QUADRA_MACHINE MACHINE_TYPE_NAME("mac-quadra")
+OBJECT_DECLARE_TYPE(MacQuadraMachineState, MacQuadraMachineClass,
+                    MAC_QUADRA_MACHINE)
+
 #define TYPE_Q800_MACHINE MACHINE_TYPE_NAME("q800")
-OBJECT_DECLARE_SIMPLE_TYPE(Q800MachineState, Q800_MACHINE)
+#define TYPE_Q700_MACHINE MACHINE_TYPE_NAME("q700")
+
+/* Base of the on-board I/O area (VIAs, SCC, SCSI, ...) */
+#define MAC_QUADRA_IO_BASE    0x50000000
+
+/* class_init for a model type: pass its MacQuadraModel as class_data */
+void mac_quadra_model_class_init(ObjectClass *oc, const void *data);
 
 #endif

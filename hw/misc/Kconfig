@@ -251,6 +251,9 @@ config DJMEMC
 config IOSB
     bool
 
+config ORWELL
+    bool
+
 config XLNX_VERSAL_TRNG
     bool
 

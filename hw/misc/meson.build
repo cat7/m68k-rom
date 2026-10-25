@@ -24,6 +24,7 @@ system_ss.add(when: 'CONFIG_MOS6522', if_true: files('mos6522.c'))
 stub_ss.add(files('mos6522-stub.c'))
 system_ss.add(when: 'CONFIG_DJMEMC', if_true: files('djmemc.c'))
 system_ss.add(when: 'CONFIG_IOSB', if_true: files('iosb.c'))
+system_ss.add(when: 'CONFIG_ORWELL', if_true: files('orwell.c'))
 
 # virt devices
 system_ss.add(when: 'CONFIG_VIRT_CTRL', if_true: files('virt_ctrl.c'))
