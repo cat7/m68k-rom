@@ -112,6 +112,7 @@ struct MOS6522Q800VIA1State {
     uint8_t cuda_out[64];
     uint8_t cuda_one_sec_mode;
     bool cuda_time_sent;
+    bool cuda_in_time;      /* cuda_in holds the time packet */
     uint8_t cuda_mem[0x100];     /* 68HC05 page 0 (registers, RAM) */
 };
 

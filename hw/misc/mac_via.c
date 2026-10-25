@@ -1137,6 +1137,10 @@ static void via1_cuda_update(MOS6522Q800VIA1State *v1s)
                 if (v1s->cuda_in_index >= v1s->cuda_in_size) {
                     /* last byte */
                     ms->b |= CUDA_TREQ;
+                    if (v1s->cuda_in_time) {
+                        v1s->cuda_in_time = false;
+                        v1s->cuda_time_sent = true;
+                    }
                 }
                 via1_cuda_delay_sr_int(v1s);
             }
@@ -1185,6 +1189,7 @@ static void via1_cuda_send_packet(MOS6522Q800VIA1State *v1s,
     MOS6522State *ms = MOS6522(v1s);
 
     assert(len <= sizeof(v1s->cuda_in));
+    v1s->cuda_in_time = false;
     trace_via1_cuda_send(len, data[0], len > 1 ? data[1] : -1,
                          len > 2 ? data[2] : -1);
     if (v1s->egret) {
@@ -1523,7 +1528,8 @@ static void via1_cuda_tick(MOS6522Q800VIA1State *v1s)
     /* time packet, same layout as the GET_TIME reply */
     stl_be_p(obuf + 3, via1_cuda_get_time(v1s));
     via1_cuda_send_packet(v1s, obuf, sizeof(obuf));
-    v1s->cuda_time_sent = true;
+    /* only counts once the host has read all of it: it may be cut short */
+    v1s->cuda_in_time = true;
 }
 
 static uint64_t mos6522_q800_via1_read(void *opaque, hwaddr addr, unsigned size)
