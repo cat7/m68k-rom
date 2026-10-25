@@ -405,6 +405,17 @@ static int via1_rtc_compact_cmd(uint8_t value)
     return REG_INVALID;
 }
 
+/*
+ * The 20 bytes of classic PRAM live inside the 256 byte extended PRAM:
+ * classic 0x00-0x0f at 0x10-0x1f, classic 0x10-0x13 at 0x08-0x0b. Older
+ * ROMs (Quadra 700) use both command sets, so the mapping matters: the
+ * extended PRAM validity signature sits at 0x0c.
+ */
+static int via1_classic_pram_addr(int addr)
+{
+    return addr < 0x10 ? addr + 0x10 : addr - 0x10 + 0x08;
+}
+
 static void via1_rtc_update(MOS6522Q800VIA1State *v1s)
 {
     MOS6522State *s = MOS6522(v1s);
@@ -473,7 +484,8 @@ static void via1_rtc_update(MOS6522Q800VIA1State *v1s)
                 break;
             case REG_PRAM_ADDR...REG_PRAM_ADDR_LAST:
                 /* PRAM address 0x00 -> 0x13 */
-                v1s->data_in = v1s->PRAM[(cmd & 0x7f) - REG_PRAM_ADDR];
+                v1s->data_in = v1s->PRAM[via1_classic_pram_addr(
+                                             (cmd & 0x7f) - REG_PRAM_ADDR)];
                 v1s->data_in_cnt = 8;
                 trace_via1_rtc_cmd_pram_read((cmd & 0x7f) - REG_PRAM_ADDR,
                                              v1s->data_in);
@@ -525,7 +537,8 @@ static void via1_rtc_update(MOS6522Q800VIA1State *v1s)
             /* PRAM address 0x00 -> 0x13 */
             trace_via1_rtc_cmd_pram_write(v1s->cmd - REG_PRAM_ADDR,
                                           v1s->data_out);
-            v1s->PRAM[v1s->cmd - REG_PRAM_ADDR] = v1s->data_out;
+            v1s->PRAM[via1_classic_pram_addr(v1s->cmd - REG_PRAM_ADDR)] =
+                v1s->data_out;
             pram_update(v1s);
             v1s->cmd = REG_EMPTY;
             break;

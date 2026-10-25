@@ -119,11 +119,34 @@ static const MacFbMode macfb_mode_table[] = {
     { MACFB_DISPLAY_APPLE_21_COLOR, 8, 0x120, 0x5ff, 1152, 870, 0x480, 0x80 },
 
     /*
-     * Quadra 700 DAFB: CTRL2 bits 11-8 are 0x6 rather than 0x7 and the
-     * frame buffer layout differs (read from the ROM's ScreenRow,
-     * ScrnBase and main GDevice gdRect low memory globals).
+     * Quadra 700 DAFB modes, as the Quadra 700 ROM programs them for each
+     * monitor sense code (CTRL2 bits 11-8 differ from the Quadra 800).
+     * Layouts read from the guest's ScreenRow, ScrnBase and main GDevice;
+     * "24" is the 32 bits per pixel mode. 640x480 also serves VGA.
      */
-    { MACFB_DISPLAY_APPLE_21_COLOR, 1, 0x100, 0x61e, 1152, 870, 0x240, 0xe00 },
+    { MACFB_DISPLAY_VGA, 1, 0x100, 0x61e, 640, 480, 0x400, 0x1000 },
+    { MACFB_DISPLAY_VGA, 2, 0x100, 0x60e, 640, 480, 0x400, 0x1000 },
+    { MACFB_DISPLAY_VGA, 4, 0x100, 0x606, 640, 480, 0x400, 0x1000 },
+    { MACFB_DISPLAY_VGA, 8, 0x100, 0x602, 640, 480, 0x400, 0x1000 },
+    { MACFB_DISPLAY_VGA, 24, 0x400, 0x6ff, 640, 480, 0x1000, 0x1000 },
+    { MACFB_DISPLAY_APPLE_12_RGB, 1, 0x100, 0x61e, 512, 384, 0x400, 0x1000 },
+    { MACFB_DISPLAY_APPLE_12_RGB, 2, 0x100, 0x60e, 512, 384, 0x400, 0x1000 },
+    { MACFB_DISPLAY_APPLE_12_RGB, 4, 0x100, 0x606, 512, 384, 0x400, 0x1000 },
+    { MACFB_DISPLAY_APPLE_12_RGB, 8, 0x100, 0x602, 512, 384, 0x400, 0x1000 },
+    { MACFB_DISPLAY_APPLE_12_RGB, 24, 0x200, 0x6ff, 512, 384, 0x800, 0x1000 },
+    { MACFB_DISPLAY_APPLE_PORTRAIT, 1, 0x80, 0x60e, 640, 870, 0x200, 0x1000 },
+    { MACFB_DISPLAY_APPLE_PORTRAIT, 2, 0x80, 0x606, 640, 870, 0x200, 0x1000 },
+    { MACFB_DISPLAY_APPLE_PORTRAIT, 4, 0x80, 0x602, 640, 870, 0x200, 0x1000 },
+    { MACFB_DISPLAY_APPLE_PORTRAIT, 8, 0x100, 0x600, 640, 870, 0x400, 0x1000 },
+    { MACFB_DISPLAY_16_COLOR, 1, 0xd0, 0x60e, 832, 624, 0x340, 0xe00 },
+    { MACFB_DISPLAY_16_COLOR, 2, 0xd0, 0x606, 832, 624, 0x340, 0xe00 },
+    { MACFB_DISPLAY_16_COLOR, 4, 0xd0, 0x602, 832, 624, 0x340, 0xe00 },
+    { MACFB_DISPLAY_16_COLOR, 8, 0xd0, 0x600, 832, 624, 0x340, 0xe00 },
+    { MACFB_DISPLAY_16_COLOR, 24, 0x340, 0x000, 832, 624, 0xd00, 0xe00 },
+    { MACFB_DISPLAY_APPLE_21_COLOR, 1, 0x90, 0x406, 1152, 870, 0x240, 0xe00 },
+    { MACFB_DISPLAY_APPLE_21_COLOR, 2, 0x90, 0x402, 1152, 870, 0x240, 0xe00 },
+    { MACFB_DISPLAY_APPLE_21_COLOR, 4, 0x90, 0x400, 1152, 870, 0x240, 0xe00 },
+    { MACFB_DISPLAY_APPLE_21_COLOR, 8, 0x120, 0x4ff, 1152, 870, 0x480, 0xe00 },
 };
 
 typedef void macfb_draw_line_func(MacfbState *s, uint8_t *d, uint32_t addr,
@@ -135,6 +158,29 @@ static inline uint8_t macfb_read_byte(MacfbState *s, uint32_t addr)
 }
 
 /* 1-bit color */
+/*
+ * Apple's monochrome monitors are driven from the blue output, and the
+ * ROM loads their grey levels into the blue CLUT channel only.
+ */
+static bool macfb_is_mono(MacfbState *s)
+{
+    return s->type == MACFB_DISPLAY_APPLE_PORTRAIT ||
+           s->type == MACFB_DISPLAY_APPLE_2PAGE_MONO ||
+           s->type == MACFB_DISPLAY_APPLE_12_MONO;
+}
+
+static inline void macfb_palette_rgb(MacfbState *s, int idx, uint8_t *r,
+                                     uint8_t *g, uint8_t *b)
+{
+    *b = s->color_palette[idx * 3 + 2];
+    if (macfb_is_mono(s)) {
+        *r = *g = *b;
+    } else {
+        *r = s->color_palette[idx * 3];
+        *g = s->color_palette[idx * 3 + 1];
+    }
+}
+
 static void macfb_draw_line1(MacfbState *s, uint8_t *d, uint32_t addr,
                              int width)
 {
@@ -144,9 +190,7 @@ static void macfb_draw_line1(MacfbState *s, uint8_t *d, uint32_t addr,
     for (x = 0; x < width; x++) {
         int bit = x & 7;
         int idx = (macfb_read_byte(s, addr) >> (7 - bit)) & 1;
-        r = s->color_palette[idx * 3];
-        g = s->color_palette[idx * 3 + 1];
-        b = s->color_palette[idx * 3 + 2];
+        macfb_palette_rgb(s, idx, &r, &g, &b);
         addr += (bit == 7);
 
         *(uint32_t *)d = rgb_to_pixel32(r, g, b);
@@ -164,9 +208,7 @@ static void macfb_draw_line2(MacfbState *s, uint8_t *d, uint32_t addr,
     for (x = 0; x < width; x++) {
         int bit = (x & 3);
         int idx = (macfb_read_byte(s, addr) >> ((3 - bit) << 1)) & 3;
-        r = s->color_palette[idx * 3];
-        g = s->color_palette[idx * 3 + 1];
-        b = s->color_palette[idx * 3 + 2];
+        macfb_palette_rgb(s, idx, &r, &g, &b);
         addr += (bit == 3);
 
         *(uint32_t *)d = rgb_to_pixel32(r, g, b);
@@ -184,9 +226,7 @@ static void macfb_draw_line4(MacfbState *s, uint8_t *d, uint32_t addr,
     for (x = 0; x < width; x++) {
         int bit = x & 1;
         int idx = (macfb_read_byte(s, addr) >> ((1 - bit) << 2)) & 15;
-        r = s->color_palette[idx * 3];
-        g = s->color_palette[idx * 3 + 1];
-        b = s->color_palette[idx * 3 + 2];
+        macfb_palette_rgb(s, idx, &r, &g, &b);
         addr += (bit == 1);
 
         *(uint32_t *)d = rgb_to_pixel32(r, g, b);
@@ -202,9 +242,7 @@ static void macfb_draw_line8(MacfbState *s, uint8_t *d, uint32_t addr,
     int x;
 
     for (x = 0; x < width; x++) {
-        r = s->color_palette[macfb_read_byte(s, addr) * 3];
-        g = s->color_palette[macfb_read_byte(s, addr) * 3 + 1];
-        b = s->color_palette[macfb_read_byte(s, addr) * 3 + 2];
+        macfb_palette_rgb(s, macfb_read_byte(s, addr), &r, &g, &b);
         addr++;
 
         *(uint32_t *)d = rgb_to_pixel32(r, g, b);
@@ -526,6 +564,11 @@ static void macfb_reset(MacfbState *s)
         s->color_palette[i * 3 + 2] = 255 - i;
     }
     memset(s->vram, 0, MACFB_VRAM_SIZE);
+    /*
+     * Sense lines are released at power-on; the Quadra 700 ROM reads the
+     * monitor sense code before writing this register.
+     */
+    s->regs[DAFB_MODE_SENSE >> 2] = 7;
     macfb_invalidate_display(s);
 }
 
@@ -578,7 +621,11 @@ static void macfb_ctrl_write(void *opaque,
     case DAFB_MODE_CTRL1 ... DAFB_MODE_CTRL1 + 3:
     case DAFB_MODE_CTRL2 ... DAFB_MODE_CTRL2 + 3:
         s->regs[addr >> 2] = val;
-        if (val) {
+        /*
+         * Zero normally means blanking; but the Quadra 700 832x624 32 bpp
+         * mode really has CTRL2 = 0, so try a match then too.
+         */
+        if (val || (addr & ~3) == DAFB_MODE_CTRL2) {
             macfb_mode_write(s);
         }
         break;
@@ -666,6 +713,19 @@ static bool macfb_common_realize(DeviceState *dev, MacfbState *s, Error **errp)
     }
 
     s->mode = macfb_find_mode(s->type, s->width, s->height, s->depth);
+    if (!s->mode) {
+        /* pick the monitor that offers this mode (e.g. 512x384: 12" RGB) */
+        for (int i = 0; i < ARRAY_SIZE(macfb_mode_table); i++) {
+            const MacFbMode *m = &macfb_mode_table[i];
+
+            if (m->width == s->width && m->height == s->height &&
+                m->depth == s->depth) {
+                s->type = m->type;
+                s->mode = m;
+                break;
+            }
+        }
+    }
     if (!s->mode) {
         gchar *list;
         error_setg(errp, "unknown display mode: width %d, height %d, depth %d",
