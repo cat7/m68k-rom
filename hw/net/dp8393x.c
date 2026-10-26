@@ -676,11 +676,16 @@ static void dp8393x_watchdog(void *opaque)
     dp8393x_update_irq(s);
 }
 
+/*
+ * With its receiver off the chip ignores the wire, so take every frame
+ * and drop it in dp8393x_receive() rather than have the net layer queue
+ * it.  Refusing frames until the guest driver starts made the vmnet
+ * backends re-raise "packets available" non-stop on a busy LAN, which
+ * starved the CPU (a Mac with bridged vmnet crawled through its boot).
+ */
 static bool dp8393x_can_receive(NetClientState *nc)
 {
-    dp8393xState *s = qemu_get_nic_opaque(nc);
-
-    return !!(s->regs[SONIC_CR] & SONIC_CR_RXEN);
+    return true;
 }
 
 static int dp8393x_receive_filter(dp8393xState *s, const uint8_t * buf,
@@ -727,6 +732,10 @@ static ssize_t dp8393x_receive(NetClientState *nc, const uint8_t * buf,
     int rx_len, padded_len;
     uint32_t checksum;
     int size;
+
+    if (!(s->regs[SONIC_CR] & SONIC_CR_RXEN)) {
+        return pkt_size;
+    }
 
     s->regs[SONIC_RCR] &= ~(SONIC_RCR_PRX | SONIC_RCR_LBK | SONIC_RCR_FAER |
         SONIC_RCR_CRCR | SONIC_RCR_LPKT | SONIC_RCR_BC | SONIC_RCR_MC);
