@@ -13,6 +13,12 @@
  *
  * At reset the ROM also appears at 0 (overlay) until VIA1 PA4 goes low.
  *
+ * The Mac IIx (maciix) and IIcx (maciicx) are the same board with a
+ * 68030, whose own PMMU does the 24-bit mapping (no AMU), and SIMMs of up
+ * to 16 MB. The ROM tells them apart by VIA1 PA6 and by VIA2 PB3 read as
+ * an input: II = 0/1, IIx = 0/0, IIcx = 1/1. The IIcx has three NuBus
+ * slots ($9-$B).
+ *
  * SPDX-License-Identifier: GPL-2.0-or-later
  */
 
@@ -76,8 +82,23 @@ enum {
     MACII_IRQ_NB,
 };
 
+typedef struct MacIIModel {
+    const char *desc;
+    const char *cpu;
+    uint8_t via1_pa6;           /* ID bit */
+    uint8_t via2_pb3;           /* pulled up: reads 1 as an input */
+    bool amu;                   /* 24-bit mapping by the AMU (68020) */
+    uint16_t slots;             /* NuBus slot mask */
+    uint32_t max_ram_mb;
+} MacIIModel;
+
 #define TYPE_MACII_MACHINE MACHINE_TYPE_NAME("macii")
-OBJECT_DECLARE_SIMPLE_TYPE(MacIIMachineState, MACII_MACHINE)
+OBJECT_DECLARE_TYPE(MacIIMachineState, MacIIMachineClass, MACII_MACHINE)
+
+struct MacIIMachineClass {
+    MachineClass parent_class;
+    const MacIIModel *model;
+};
 
 struct MacIIMachineState {
     MachineState parent_obj;
@@ -89,6 +110,7 @@ struct MacIIMachineState {
     MemoryRegion ram_space;
     MemoryRegion open_bus;
     MemoryRegion ram_alias[8];
+    const MacIIModel *model;
     MemoryRegion io;
     MemoryRegion io_alias[MACII_IO_SIZE / MACII_IO_SLICE];
 
@@ -132,6 +154,10 @@ static void macii_set_mode32(void *opaque, int n, int level)
 {
     MacIIMachineState *m = opaque;
 
+    if (!m->model->amu) {
+        return;
+    }
+
     m->mode32 = level;
     m68k_cpu_set_addr_map(&m->cpu, level ? NULL : macii_map24, m);
 }
@@ -141,6 +167,26 @@ static void macii_set_overlay(void *opaque, int n, int level)
     MacIIMachineState *m = opaque;
 
     memory_region_set_enabled(&m->overlay, level);
+}
+
+/* Bank size for the SIMM size code: 256 KB, 1 MB, 4 MB, 16 MB SIMMs */
+static uint64_t macii_bank_size(uint8_t code)
+{
+    return (1 * MiB) << (2 * code);
+}
+
+/* The SIMM size code @size needs, with one or two full banks */
+static int macii_ram_code_for(uint64_t size, bool *two_banks)
+{
+    int code;
+
+    for (code = 0; code < 4; code++) {
+        if (size == macii_bank_size(code) || size == 2 * macii_bank_size(code)) {
+            *two_banks = size == 2 * macii_bank_size(code);
+            return code;
+        }
+    }
+    return -1;
 }
 
 /*
@@ -155,8 +201,8 @@ static void macii_update_ram(MacIIMachineState *m)
 {
     MachineState *machine = MACHINE(m);
     uint64_t size = machine->ram_size;
-    bool two_banks = size == 2 * MiB || size == 8 * MiB;
-    uint8_t want = size >= 4 * MiB ? 1 : 0;
+    bool two_banks;
+    uint8_t want = macii_ram_code_for(size, &two_banks);
     uint64_t seg = (m->ram_code == want) ? size : 1 * MiB;
     int i;
 
@@ -312,7 +358,9 @@ static void macii_reset_out(void *opaque, int n, int level)
 static void macii_machine_init(MachineState *machine)
 {
     MacIIMachineState *m = MACII_MACHINE(machine);
+    const MacIIModel *model = MACII_MACHINE_GET_CLASS(m)->model;
     const char *bios_name = machine->firmware ?: "MacII.rom";
+    bool two_banks;
     MemoryRegion *sysmem = get_system_memory();
     SysBusDevice *sysbus;
     DeviceState *dev;
@@ -321,9 +369,12 @@ static void macii_machine_init(MachineState *machine)
     char *filename;
     int i, size;
 
-    if (machine->ram_size != 1 * MiB && machine->ram_size != 2 * MiB &&
-        machine->ram_size != 4 * MiB && machine->ram_size != 8 * MiB) {
-        error_report("The Macintosh II takes 1, 2, 4 or 8 MB of memory");
+    m->model = model;
+    if (macii_ram_code_for(machine->ram_size, &two_banks) < 0 ||
+        machine->ram_size > model->max_ram_mb * MiB) {
+        error_report("The %s takes one or two banks of 1, 4, 16 or 64 MB "
+                     "(1, 2, 4, 8, 16, 32, 64 or 128 MB), up to %u MB",
+                     model->desc, model->max_ram_mb);
         exit(1);
     }
 
@@ -373,7 +424,7 @@ static void macii_machine_init(MachineState *machine)
     object_initialize_child(OBJECT(machine), "via1", &m->via1,
                             TYPE_MOS6522_Q800_VIA1);
     dev = DEVICE(&m->via1);
-    qdev_prop_set_uint8(dev, "cpuid", 0);           /* PA6 = 0: Mac II */
+    qdev_prop_set_uint8(dev, "cpuid", model->via1_pa6 << 6);
     qdev_prop_set_uint8(dev, "cpuid-mask", 0x40);
     qdev_prop_set_uint8(dev, "porta-pullup", 0xbf);
     qdev_prop_set_bit(dev, "adb", true);
@@ -399,7 +450,8 @@ static void macii_machine_init(MachineState *machine)
     object_initialize_child(OBJECT(machine), "via2", &m->via2,
                             TYPE_MOS6522_Q800_VIA2);
     dev = DEVICE(&m->via2);
-    qdev_prop_set_uint8(dev, "portb-pullup", 0xff);  /* PB3 = 1: Mac II */
+    qdev_prop_set_uint8(dev, "portb-pullup",
+                        model->via2_pb3 ? 0xff : 0xf7);
     sysbus = SYS_BUS_DEVICE(dev);
     sysbus_realize(sysbus, &error_fatal);
     memory_region_add_subregion(&m->io, VIA2_OFFSET,
@@ -503,7 +555,7 @@ static void macii_machine_init(MachineState *machine)
     object_initialize_child(OBJECT(machine), "mac-nubus-bridge",
                             &m->nubus_bridge, TYPE_MAC_NUBUS_BRIDGE);
     dev = DEVICE(&m->nubus_bridge);
-    qdev_prop_set_uint32(dev, "slot-available-mask", 0x7e00);
+    qdev_prop_set_uint32(dev, "slot-available-mask", model->slots);
     sysbus = SYS_BUS_DEVICE(dev);
     sysbus_realize(sysbus, &error_fatal);
     memory_region_add_subregion(sysmem,
@@ -514,6 +566,9 @@ static void macii_machine_init(MachineState *machine)
                                 MAC_NUBUS_FIRST_SLOT * NUBUS_SLOT_SIZE,
                                 sysbus_mmio_get_region(sysbus, 1));
     for (i = 0; i < VIA2_NUBUS_IRQ_NB; i++) {
+        if (!(model->slots & BIT(9 + i))) {
+            continue;
+        }
         qdev_connect_gpio_out(dev, 9 + i,
                               qdev_get_gpio_in_named(DEVICE(&m->via2),
                                                      "nubus-irq",
@@ -540,18 +595,43 @@ static void macii_machine_init(MachineState *machine)
     m->mode32 = true;
 }
 
+static const MacIIModel macii_model = {
+    .desc = "Macintosh II", .cpu = M68K_CPU_TYPE_NAME("m68020"),
+    .via1_pa6 = 0, .via2_pb3 = 1, .amu = true, .slots = 0x7e00,
+    .max_ram_mb = 8,
+};
+
+static const MacIIModel maciix_model = {
+    .desc = "Macintosh IIx", .cpu = M68K_CPU_TYPE_NAME("m68030"),
+    .via1_pa6 = 0, .via2_pb3 = 0, .amu = false, .slots = 0x7e00,
+    .max_ram_mb = 128,
+};
+
+static const MacIIModel maciicx_model = {
+    .desc = "Macintosh IIcx", .cpu = M68K_CPU_TYPE_NAME("m68030"),
+    .via1_pa6 = 1, .via2_pb3 = 1, .amu = false, .slots = 0x0e00,
+    .max_ram_mb = 128,
+};
+
 static void macii_machine_class_init(ObjectClass *oc, const void *data)
 {
     static const char * const valid_cpu_types[] = {
         M68K_CPU_TYPE_NAME("m68020"),
+        M68K_CPU_TYPE_NAME("m68030"),
         NULL
     };
     MachineClass *mc = MACHINE_CLASS(oc);
+    MacIIMachineClass *mmc = MACII_MACHINE_CLASS(oc);
+    const MacIIModel *model = data ? data : &macii_model;
 
-    mc->desc = "Macintosh II";
+    mmc->model = model;
+    mc->desc = model->desc;
+    mc->default_cpu_type = model->cpu;
+    if (data) {
+        return;                 /* a variant: the rest comes from macii */
+    }
     mc->init = macii_machine_init;
     mc->reset = macii_machine_reset;
-    mc->default_cpu_type = M68K_CPU_TYPE_NAME("m68020");
     mc->valid_cpu_types = valid_cpu_types;
     mc->max_cpus = 1;
     mc->block_default_type = IF_SCSI;
@@ -565,7 +645,18 @@ static const TypeInfo macii_machine_types[] = {
         .name           = TYPE_MACII_MACHINE,
         .parent         = TYPE_MACHINE,
         .instance_size  = sizeof(MacIIMachineState),
+        .class_size     = sizeof(MacIIMachineClass),
         .class_init     = macii_machine_class_init,
+    }, {
+        .name           = MACHINE_TYPE_NAME("maciix"),
+        .parent         = TYPE_MACII_MACHINE,
+        .class_init     = macii_machine_class_init,
+        .class_data     = &maciix_model,
+    }, {
+        .name           = MACHINE_TYPE_NAME("maciicx"),
+        .parent         = TYPE_MACII_MACHINE,
+        .class_init     = macii_machine_class_init,
+        .class_data     = &maciicx_model,
     },
 };
 
