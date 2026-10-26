@@ -22,7 +22,8 @@
  *
  * The host downloads 6502 code into the RAM before starting the IOP.
  * This model does not run it; it implements the message protocol
- * directly ("high-level emulation").
+ * directly ("high-level emulation"): ADB on channel 2 and the floppy
+ * drives on channel 1 of the SWIM IOP.
  *
  * SPDX-License-Identifier: GPL-2.0-or-later
  */
@@ -34,6 +35,10 @@
 #include "hw/core/qdev-properties.h"
 #include "hw/misc/mac_iop.h"
 #include "migration/vmstate.h"
+#include "qapi/error.h"
+#include "system/address-spaces.h"
+#include "system/block-backend.h"
+#include "hw/core/boards.h"
 #include "trace.h"
 
 /* host registers (byte wide, on even addresses) */
@@ -199,10 +204,322 @@ static void mac_iop_adb_poll(void *opaque)
     }
 }
 
+
+/*
+ * Floppy drives on the SWIM IOP, channel 1, as the Mac OS ".Sony" driver
+ * for IOP machines uses them. A request is
+ *
+ *   +0 kind, +1 drive number, +2 error (OSErr, the reply's)
+ *
+ * and the IOP answers in place. Reads and writes carry the host buffer
+ * at +4, the first block at +8, the block count at +12 and file tags at
+ * +16; the IOP moves the data to or from Mac memory itself. Drive status
+ * replies, and the insert messages the IOP sends on its own channel 1,
+ * carry the Sony driver's status fields:
+ *
+ *   +4  track (word)          +6 write protected ($FF), disk in place,
+ *                                installed, sides ($FF: two)
+ *   +10 two-sided format, needs flush, disk errors (word)
+ *   +14 drive info (long)     +22 format of the disk (bit mask)
+ *   +24 formats the drive takes: bit 0 HD20, 1 400K, 2 800K, 3 720K,
+ *       4 1440K
+ */
+#define IOP_FD_CHAN             1
+
+enum {
+    FD_INIT = 1,
+    FD_SHUTDOWN,
+    FD_START_POLL,
+    FD_STOP_POLL,
+    FD_SET_TAG_ADDR,
+    FD_STATUS,
+    FD_EJECT,
+    FD_FORMAT,
+    FD_FORMAT_VERIFY,
+    FD_WRITE,
+    FD_READ,
+    FD_READ_VERIFY,
+};
+
+/* the IOP's insert message */
+#define FD_EVT_INSERTED         1
+
+#define FD_DRIVE_SUPERDRIVE     4       /* FDHD: 400K to 1440K */
+#define FD_FORMATS_SUPERDRIVE   0x1e
+
+#define OS_NOERR                0
+#define OS_PARAMERR             (-50)
+#define OS_WPRERR               (-44)
+#define OS_OFFLINERR            (-65)
+#define OS_NSDRVERR             (-56)
+#define OS_IOERR                (-36)
+#define OS_DATAVERERR           (-68)
+
+static void put_be16(uint8_t *p, uint16_t v)
+{
+    p[0] = v >> 8;
+    p[1] = v;
+}
+
+static void put_be32(uint8_t *p, uint32_t v)
+{
+    put_be16(p, v >> 16);
+    put_be16(p + 2, v);
+}
+
+static uint32_t get_be32(const uint8_t *p)
+{
+    return (p[0] << 24) | (p[1] << 16) | (p[2] << 8) | p[3];
+}
+
+/* drive n (1, 2) to index, or -1 */
+static int mac_iop_fd_index(MacIOPState *s, int drive)
+{
+    int i = drive - 1;
+
+    if (i < 0 || i >= MAC_IOP_NUM_FD || (i > 0 && !s->fd_blk[i])) {
+        return -1;
+    }
+    return i;
+}
+
+static bool mac_iop_fd_has_disk(MacIOPState *s, int i)
+{
+    return s->fd_in[i] && s->fd_blk[i] && blk_is_inserted(s->fd_blk[i]);
+}
+
+static uint32_t mac_iop_fd_blocks(MacIOPState *s, int i)
+{
+    return mac_iop_fd_has_disk(s, i) ? blk_getlength(s->fd_blk[i]) / 512 : 0;
+}
+
+/* the format bit of a disk of @blocks */
+static uint16_t mac_iop_fd_format(uint32_t blocks)
+{
+    switch (blocks) {
+    case 800:
+        return BIT(1);
+    case 1600:
+        return BIT(2);
+    case 1440:
+        return BIT(3);
+    case 2880:
+        return BIT(4);
+    }
+    return 0;
+}
+
+static void mac_iop_fd_status(MacIOPState *s, int i, uint8_t *msg)
+{
+    uint32_t blocks = mac_iop_fd_blocks(s, i);
+    bool disk = blocks != 0;
+
+    memset(msg + 4, 0, MAC_IOP_MSG_LEN - 4);
+    msg[6] = disk && !blk_is_writable(s->fd_blk[i]) ? 0xff : 0;
+    msg[7] = disk ? 2 : 0;
+    msg[8] = 1;
+    msg[9] = 0xff;
+    msg[10] = disk && blocks != 800 ? 0xff : 0;
+    put_be32(msg + 14, FD_DRIVE_SUPERDRIVE | (i ? 0x100 : 0));
+    put_be16(msg + 22, mac_iop_fd_format(blocks));
+    put_be16(msg + 24, FD_FORMATS_SUPERDRIVE);
+}
+
+/* Mac memory for a buffer the host gave; in 24-bit mode only A0-A23 count */
+static hwaddr mac_iop_host_addr(uint32_t addr, uint32_t len)
+{
+    uint64_t ram = current_machine->ram_size;
+
+    if (addr + (uint64_t)len > ram && (addr & 0xffffff) + len <= ram) {
+        addr &= 0xffffff;
+    }
+    return addr;
+}
+
+static int mac_iop_fd_rw(MacIOPState *s, int i, uint8_t *msg, int kind)
+{
+    uint32_t buf = get_be32(msg + 4);
+    uint32_t block = get_be32(msg + 8);
+    uint32_t count = get_be32(msg + 12);
+    uint32_t blocks = mac_iop_fd_blocks(s, i);
+    hwaddr host = mac_iop_host_addr(buf, count * 512);
+    uint8_t data[512], mem[512];
+    uint32_t n;
+
+    if (!blocks) {
+        return OS_OFFLINERR;
+    }
+    if (block > blocks || count > blocks - block) {
+        return OS_PARAMERR;
+    }
+    if (kind == FD_WRITE && !blk_is_writable(s->fd_blk[i])) {
+        return OS_WPRERR;
+    }
+    for (n = 0; n < count; n++, host += 512) {
+        int64_t off = (int64_t)(block + n) * 512;
+
+        if (kind == FD_WRITE) {
+            address_space_read(&address_space_memory, host,
+                               MEMTXATTRS_UNSPECIFIED, data, 512);
+            if (blk_pwrite(s->fd_blk[i], off, 512, data, 0) < 0) {
+                return OS_IOERR;
+            }
+            continue;
+        }
+        if (blk_pread(s->fd_blk[i], off, 512, data, 0) < 0) {
+            return OS_IOERR;
+        }
+        if (kind == FD_READ) {
+            address_space_write(&address_space_memory, host,
+                                MEMTXATTRS_UNSPECIFIED, data, 512);
+        } else {
+            address_space_read(&address_space_memory, host,
+                               MEMTXATTRS_UNSPECIFIED, mem, 512);
+            if (memcmp(data, mem, 512)) {
+                return OS_DATAVERERR;
+            }
+        }
+    }
+    /* image files have no tags */
+    memset(msg + 16, 0, 12);
+    return OS_NOERR;
+}
+
+/* "Formatting" an image: the size stays, the contents go */
+static int mac_iop_fd_format_disk(MacIOPState *s, int i)
+{
+    uint32_t blocks = mac_iop_fd_blocks(s, i);
+    uint8_t zero[512] = { 0 };
+    uint32_t n;
+
+    if (!blocks) {
+        return OS_OFFLINERR;
+    }
+    if (!blk_is_writable(s->fd_blk[i])) {
+        return OS_WPRERR;
+    }
+    for (n = 0; n < blocks; n++) {
+        if (blk_pwrite(s->fd_blk[i], (int64_t)n * 512, 512, zero, 0) < 0) {
+            return OS_IOERR;
+        }
+    }
+    return OS_NOERR;
+}
+
+static void mac_iop_fd_report_insert(MacIOPState *s, int i)
+{
+    uint8_t msg[MAC_IOP_MSG_LEN] = { 0 };
+
+    if (!s->fd_polling || !mac_iop_fd_has_disk(s, i)) {
+        return;
+    }
+    mac_iop_fd_status(s, i, msg);
+    msg[0] = FD_EVT_INSERTED;
+    msg[1] = i + 1;
+    mac_iop_queue_recv(s, IOP_FD_CHAN, msg);
+}
+
+static void mac_iop_fd_send(MacIOPState *s, uint8_t *msg)
+{
+    int kind = msg[0];
+    int i = mac_iop_fd_index(s, msg[1]);
+    int err = OS_NOERR;
+
+    switch (kind) {
+    case FD_INIT:
+        /* drive kinds of drives 0-4: an internal SuperDrive, maybe two */
+        memset(msg + 4, 0, 5);
+        for (i = 0; i < MAC_IOP_NUM_FD; i++) {
+            if (i == 0 || s->fd_blk[i]) {
+                msg[5 + i] = FD_DRIVE_SUPERDRIVE;
+            }
+        }
+        break;
+    case FD_START_POLL:
+        s->fd_polling = true;
+        for (i = 0; i < MAC_IOP_NUM_FD; i++) {
+            mac_iop_fd_report_insert(s, i);
+        }
+        break;
+    case FD_STOP_POLL:
+    case FD_SHUTDOWN:
+        s->fd_polling = false;
+        break;
+    case FD_STATUS:
+    case FD_EJECT:
+        if (i < 0) {
+            err = OS_NSDRVERR;
+            break;
+        }
+        if (kind == FD_EJECT) {
+            if (!mac_iop_fd_has_disk(s, i)) {
+                err = OS_OFFLINERR;
+            }
+            s->fd_in[i] = false;
+        }
+        mac_iop_fd_status(s, i, msg);
+        break;
+    case FD_FORMAT:
+    case FD_FORMAT_VERIFY:
+    case FD_WRITE:
+    case FD_READ:
+    case FD_READ_VERIFY:
+        if (i < 0) {
+            err = OS_NSDRVERR;
+        } else if (kind == FD_FORMAT) {
+            err = mac_iop_fd_format_disk(s, i);
+        } else if (kind == FD_FORMAT_VERIFY) {
+            err = mac_iop_fd_blocks(s, i) ? OS_NOERR : OS_OFFLINERR;
+        } else {
+            err = mac_iop_fd_rw(s, i, msg, kind);
+        }
+        break;
+    default:
+        /* tag addresses, caches, raw data: nothing to do here */
+        break;
+    }
+    trace_mac_iop_floppy(kind, msg[1], err);
+    put_be16(msg + 2, err);
+}
+
+/* write permission only for disks that allow it, so read-only ones fit */
+static int mac_iop_fd_set_perm(BlockBackend *blk, Error **errp)
+{
+    return blk_set_perm(blk, BLK_PERM_CONSISTENT_READ |
+                        (blk_supports_write_perm(blk) ? BLK_PERM_WRITE : 0),
+                        BLK_PERM_ALL, errp);
+}
+
+static void mac_iop_fd_change(void *opaque, bool load, Error **errp)
+{
+    MacIOPFloppyRef *ref = opaque;
+    MacIOPState *s = ref->iop;
+    int i = ref->index;
+    BlockBackend *blk = s->fd_blk[i];
+
+    if (!load) {
+        blk_set_perm(blk, 0, BLK_PERM_ALL, &error_abort);
+        s->fd_in[i] = false;
+        return;
+    }
+    if (mac_iop_fd_set_perm(blk, errp) < 0) {
+        return;
+    }
+    s->fd_in[i] = blk_is_inserted(blk);
+    mac_iop_fd_report_insert(s, i);
+}
+
+static const BlockDevOps mac_iop_fd_ops = {
+    .change_media_cb = mac_iop_fd_change,
+};
 static void mac_iop_handle_send(MacIOPState *s, int chan, uint8_t *msg)
 {
     if (s->kind == MAC_IOP_ISM && chan == IOP_ADB_CHAN) {
         mac_iop_adb_send(s, msg);
+        return;
+    }
+    if (s->kind == MAC_IOP_ISM && chan == IOP_FD_CHAN) {
+        mac_iop_fd_send(s, msg);
         return;
     }
     qemu_log_mask(LOG_UNIMP, "mac-iop %d: send chan %d %02x %02x %02x %02x "
@@ -383,6 +700,10 @@ static void mac_iop_reset_hold(Object *obj, ResetType type)
     s->adb_autopoll = false;
     memset(s->recv_queue, 0, sizeof(s->recv_queue));
     adb_set_autopoll_enabled(&s->adb_bus, false);
+    s->fd_polling = false;
+    for (int i = 0; i < MAC_IOP_NUM_FD; i++) {
+        s->fd_in[i] = s->fd_blk[i] && blk_is_inserted(s->fd_blk[i]);
+    }
     timer_del(s->timer);
     mac_iop_update_irq(s);
 }
@@ -393,6 +714,20 @@ static void mac_iop_realize(DeviceState *dev, Error **errp)
 
     s->timer = timer_new_ns(QEMU_CLOCK_VIRTUAL, mac_iop_timer, s);
     adb_register_autopoll_callback(&s->adb_bus, mac_iop_adb_poll, s);
+
+    for (int i = 0; i < MAC_IOP_NUM_FD; i++) {
+        BlockBackend *blk = s->fd_blk[i];
+
+        if (!blk) {
+            continue;
+        }
+        if (mac_iop_fd_set_perm(blk, errp) < 0) {
+            return;
+        }
+        s->fd_ref[i].iop = s;
+        s->fd_ref[i].index = i;
+        blk_set_dev_ops(blk, &mac_iop_fd_ops, &s->fd_ref[i]);
+    }
 }
 
 static void mac_iop_init(Object *obj)
@@ -419,12 +754,16 @@ static const VMStateDescription vmstate_mac_iop = {
         VMSTATE_UINT8(status, MacIOPState),
         VMSTATE_TIMER_PTR(timer, MacIOPState),
         VMSTATE_BOOL(adb_autopoll, MacIOPState),
+        VMSTATE_BOOL_ARRAY(fd_in, MacIOPState, MAC_IOP_NUM_FD),
+        VMSTATE_BOOL(fd_polling, MacIOPState),
         VMSTATE_END_OF_LIST()
     }
 };
 
 static const Property mac_iop_properties[] = {
     DEFINE_PROP_UINT8("kind", MacIOPState, kind, MAC_IOP_SCC),
+    DEFINE_PROP_DRIVE("drive0", MacIOPState, fd_blk[0]),
+    DEFINE_PROP_DRIVE("drive1", MacIOPState, fd_blk[1]),
 };
 
 static void mac_iop_class_init(ObjectClass *oc, const void *data)

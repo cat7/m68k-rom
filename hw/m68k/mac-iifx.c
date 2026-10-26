@@ -546,10 +546,18 @@ static void iifx_machine_init(MachineState *machine)
     qdev_connect_gpio_out(DEVICE(&m->scc_orgate), 0,
                           qdev_get_gpio_in(oss, OSS_SRC_SCC_IOP));
 
-    /* SWIM IOP: ADB (and the floppy, not done yet) */
+    /* SWIM IOP: ADB and the floppy drives */
     object_initialize_child(OBJECT(machine), "swim-iop", &m->swim_iop,
                             TYPE_MAC_IOP);
     qdev_prop_set_uint8(DEVICE(&m->swim_iop), "kind", MAC_IOP_ISM);
+    for (i = 0; i < MAC_IOP_NUM_FD; i++) {
+        DriveInfo *fd = drive_get(IF_FLOPPY, 0, i);
+
+        if (fd) {
+            qdev_prop_set_drive(DEVICE(&m->swim_iop), i ? "drive1" : "drive0",
+                                blk_by_legacy_dinfo(fd));
+        }
+    }
     sysbus = SYS_BUS_DEVICE(&m->swim_iop);
     sysbus_realize(sysbus, &error_fatal);
     memory_region_add_subregion(&m->io, SWIM_IOP_OFFSET,

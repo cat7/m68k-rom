@@ -11,6 +11,7 @@
 
 #include "hw/core/sysbus.h"
 #include "hw/input/adb.h"
+#include "hw/block/block.h"
 #include "qom/object.h"
 
 #define MAC_IOP_RAM_SIZE    0x8000
@@ -25,6 +26,16 @@ typedef enum MacIOPKind {
 } MacIOPKind;
 
 #define MAC_IOP_QUEUE_LEN   8
+
+#define MAC_IOP_NUM_FD      2   /* floppy drives 1 (internal) and 2 */
+
+typedef struct MacIOPState MacIOPState;
+
+/* what a floppy drive's media-change callback gets */
+typedef struct MacIOPFloppyRef {
+    MacIOPState *iop;
+    int index;
+} MacIOPFloppyRef;
 
 typedef struct MacIOPQueue {
     uint8_t msg[MAC_IOP_QUEUE_LEN][MAC_IOP_MSG_LEN];
@@ -51,6 +62,12 @@ struct MacIOPState {
     /* ADB (ISM IOP) */
     ADBBusState adb_bus;
     bool adb_autopoll;
+
+    /* floppy drives (ISM IOP) */
+    BlockBackend *fd_blk[MAC_IOP_NUM_FD];
+    bool fd_in[MAC_IOP_NUM_FD];         /* a disk is in the drive */
+    bool fd_polling;                    /* the host wants insert events */
+    MacIOPFloppyRef fd_ref[MAC_IOP_NUM_FD];
 
     /* IOP-to-host messages not yet in the receive channels */
     MacIOPQueue recv_queue[MAC_IOP_NUM_CHAN];
