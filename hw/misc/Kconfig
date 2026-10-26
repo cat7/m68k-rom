@@ -251,6 +251,9 @@ config DJMEMC
 config IOSB
     bool
 
+config MAC_OSS
+    bool
+
 config MAC_IOP
     bool
     select ADB

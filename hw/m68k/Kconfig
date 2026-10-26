@@ -86,3 +86,16 @@ config MACII
     select ASC
     select SWIM2
     select UNIMP
+
+config MACIIFX
+    bool
+    default y
+    depends on M68K
+    select MAC_VIA
+    select MAC_OSS
+    select MAC_IOP
+    select NUBUS
+    select ESCC
+    select OR_IRQ
+    select ASC
+    select UNIMP

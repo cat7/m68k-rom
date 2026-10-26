@@ -26,6 +26,7 @@ system_ss.add(when: 'CONFIG_DJMEMC', if_true: files('djmemc.c'))
 system_ss.add(when: 'CONFIG_IOSB', if_true: files('iosb.c'))
 system_ss.add(when: 'CONFIG_ORWELL', if_true: files('orwell.c'))
 system_ss.add(when: 'CONFIG_MAC_IOP', if_true: files('mac_iop.c'))
+system_ss.add(when: 'CONFIG_MAC_OSS', if_true: files('mac_oss.c'))
 
 # virt devices
 system_ss.add(when: 'CONFIG_VIRT_CTRL', if_true: files('virt_ctrl.c'))

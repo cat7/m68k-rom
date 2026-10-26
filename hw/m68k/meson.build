@@ -8,6 +8,7 @@ m68k_ss.add(when: 'CONFIG_Q700', if_true: files('q700.c'))
 m68k_ss.add(when: 'CONFIG_Q900', if_true: files('q900.c'))
 m68k_ss.add(when: 'CONFIG_LC475', if_true: files('lc475.c'))
 m68k_ss.add(when: 'CONFIG_MACII', if_true: files('mac-ii.c'))
+m68k_ss.add(when: 'CONFIG_MACIIFX', if_true: files('mac-iifx.c'))
 m68k_ss.add(when: 'CONFIG_M68K_VIRT', if_true: files('virt.c'))
 
 hw_arch += {'m68k': m68k_ss}
