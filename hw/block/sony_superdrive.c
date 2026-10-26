@@ -887,11 +887,12 @@ bool sony_drive_read_byte(SonyDrive *const drive,
     } else {
         const uint16_t offset = drive->xfer_position;
         drive->xfer_position++;
-        const uint8_t value = drive->xfer_buffer[offset];
+        uint8_t value = drive->xfer_buffer[offset];
         const bool is_mark = bitset_get(drive->xfer_mark_bitset, offset);
 
-        if (drive->gcr_encode) {
-            assert(value & 0x80);
+        if (drive->gcr_encode && !(value & 0x80)) {
+            /* a self-sync pattern the CPU wrote (FF 3F CF ...) reads as FF */
+            value = 0xff;
         }
 
         *value_out = value;
@@ -913,13 +914,12 @@ bool sony_drive_write_byte(SonyDrive *const drive, const uint8_t value)
      * NOTE: for now, we should't get a write unless we have an active sector.
      * We'll have to revisit this to implement duplicating/formatting.
      */
-    assert(drive->xfer_active);
-
-    if (!drive->xfer_active) {
+    if (!drive->xfer_active ||
+        drive->xfer_write_position >= drive->xfer_length) {
+        /* e.g. formatting through the IWM: not emulated, dropped */
         return false;
     } else {
         const uint16_t offset = drive->xfer_write_position;
-        assert(offset < drive->xfer_length);
 
         drive->xfer_buffer[offset] = value;
         drive->xfer_write_position++;

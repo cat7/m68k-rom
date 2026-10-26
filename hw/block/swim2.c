@@ -283,7 +283,7 @@ static void swim2_push_fifo_to_drive(SWIM2State *const ctrl)
             if (ctrl->wait_for_mark && is_mark) {
                 ctrl->wait_for_mark = false;
             } else if (!ctrl->wait_for_mark && !is_mark) {
-                sony_drive_write_byte(drive, data);
+            sony_drive_write_byte(drive, data);
             }
         }
     }
@@ -466,6 +466,9 @@ static uint8_t swim1_iwm_access(SWIM2State *const ctrl, const hwaddr addr,
     const bool nq6 = ctrl->iwm_latches & BIT(IWM_LATCH_Q6);
     const bool nq7 = ctrl->iwm_latches & BIT(IWM_LATCH_Q7);
     const bool nmotor = ctrl->iwm_latches & BIT(IWM_LATCH_MOTORON);
+    const uint8_t sel = (ctrl->iwm_latches & BIT(IWM_LATCH_DRIVESEL)) ? 1 : 0;
+    SonyDrive *const drive = ctrl->drives[sel] ? &ctrl->drives[sel]->sony
+                                               : NULL;
 
     if (is_write) {
         if (nq6 && nq7 && !nmotor) {
@@ -492,19 +495,15 @@ static uint8_t swim1_iwm_access(SWIM2State *const ctrl, const hwaddr addr,
                 swim2_apply_drive_lines(ctrl);
             }
         }
-        /* GCR data writes through IWM mode are not emulated */
+        if (nq6 && nq7 && nmotor && drive) {
+            /* GCR data byte to the drive (the Mac II's 800K disks) */
+            sony_drive_write_byte(drive, data);
+        }
         return 0;
     }
 
     if (!nq7 && nq6) {
         /* status: sense, enabled, mode bits */
-        SonyDrive *drive = NULL;
-        const uint8_t sel = (ctrl->iwm_latches & BIT(IWM_LATCH_DRIVESEL)) ?
-                            1 : 0;
-
-        if (ctrl->drives[sel]) {
-            drive = &ctrl->drives[sel]->sony;
-        }
         value = ctrl->iwm_mode_reg & 0x1f;
         if (!drive || sony_drive_read_sense(drive)) {
             value |= 0x80;
@@ -515,9 +514,21 @@ static uint8_t swim1_iwm_access(SWIM2State *const ctrl, const hwaddr addr,
     } else if (nq7 && !nq6) {
         /* write handshake: ready, no underrun */
         value = 0xc0;
+    } else if (!nq7 && !nq6) {
+        /*
+         * Data register: the next GCR byte under the head. The Mac's Sony
+         * driver reads each byte once (bit 7 set = valid), so every read
+         * hands over the next one.
+         */
+        bool is_mark;
+
+        value = 0x00;
+        if (!nmotor || !drive || !sony_drive_read_byte(drive, &value,
+                                                       &is_mark)) {
+            value = 0x00;
+        }
     } else {
-        /* GCR data reads through IWM mode are not emulated */
-        value = nq7 ? 0xff : 0x00;
+        value = 0xff;
     }
     return value;
 }
