@@ -1,6 +1,8 @@
 nubus_ss = ss.source_set()
 nubus_ss.add(files('nubus-device.c'))
 nubus_ss.add(files('nubus-bus.c'))
+nubus_ss.add(files('nubus-decl-rom.c'))
+nubus_ss.add(files('nubus-video.c'))
 nubus_ss.add(files('nubus-bridge.c'))
 nubus_ss.add(files('nubus-virtio-mmio.c'))
 nubus_ss.add(when: 'CONFIG_DP8393X', if_true: files('mac-pds-ethernet.c'))

@@ -32,6 +32,7 @@
 #include "gdbstub/helpers.h"
 #include "fpu/softfloat.h"
 #include "qemu/qemu-print.h"
+#include "hw/core/irq.h"
 
 #define SIGNBIT (1u << 31)
 
@@ -2191,6 +2192,7 @@ uint32_t HELPER(ptest030)(CPUM68KState *env, uint32_t addr, uint32_t fc,
 
 void HELPER(reset)(CPUM68KState *env)
 {
-    /* FIXME: reset all except CPU */
+    /* the board resets the devices on its reset line */
+    qemu_irq_pulse(env_archcpu(env)->reset_out);
 }
 #endif /* !CONFIG_USER_ONLY */

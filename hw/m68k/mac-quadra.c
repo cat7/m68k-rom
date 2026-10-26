@@ -109,6 +109,27 @@ static void main_cpu_reset(void *opaque)
     cpu->env.pc = ldl_phys(cs->as, 4);
 }
 
+/*
+ * The RESET instruction (run by the ROM when Mac OS restarts) resets the
+ * cards in the NuBus slots, so that none keeps interrupting
+ */
+static void mac_quadra_reset_out(void *opaque, int n, int level)
+{
+    MacQuadraMachineState *m = opaque;
+    BusState *bus = qdev_get_child_bus(DEVICE(&m->mac_nubus_bridge),
+                                       "nubus-bus.0");
+    BusChild *kid;
+
+    if (!level) {
+        return;
+    }
+    QTAILQ_FOREACH(kid, &bus->children, sibling) {
+        if (kid->child != DEVICE(&m->macfb)) {
+            device_cold_reset(kid->child);
+        }
+    }
+}
+
 static void rerandomize_rng_seed(void *opaque)
 {
     struct bi_record *rng_seed = opaque;
@@ -685,6 +706,8 @@ static void q800_machine_init(MachineState *machine)
                                                  VIA2_NUBUS_IRQ_9));
 
     nubus = NUBUS_BUS(qdev_get_child_bus(dev, "nubus-bus.0"));
+    qdev_connect_gpio_out_named(DEVICE(&m->cpu), "reset-out", 0,
+                                qemu_allocate_irq(mac_quadra_reset_out, m, 0));
 
     /* framebuffer in nubus slot #9 */
 

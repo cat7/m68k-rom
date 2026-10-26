@@ -799,6 +799,15 @@ static void m68k_cpu_class_init_m68k_core(ObjectClass *c, const void *data)
         .class_init = m68k_cpu_class_init_m68k_core  \
     }
 
+static void m68k_cpu_instance_init(Object *obj)
+{
+#ifndef CONFIG_USER_ONLY
+    M68kCPU *cpu = M68K_CPU(obj);
+
+    qdev_init_gpio_out_named(DEVICE(cpu), &cpu->reset_out, "reset-out", 1);
+#endif
+}
+
 static const TypeInfo m68k_cpus_type_infos[] = {
     { /* base class should be registered first */
         .name = TYPE_M68K_CPU,
@@ -806,6 +815,7 @@ static const TypeInfo m68k_cpus_type_infos[] = {
         .instance_size = sizeof(M68kCPU),
         .instance_align = __alignof(M68kCPU),
         .abstract = true,
+        .instance_init = m68k_cpu_instance_init,
         .class_size = sizeof(M68kCPUClass),
         .class_init = m68k_cpu_class_init,
     },

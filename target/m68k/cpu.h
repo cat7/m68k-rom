@@ -185,6 +185,8 @@ struct ArchCPU {
 
     M68kAddrMapFn addr_map;
     void *addr_map_opaque;
+    /* pulsed by the RESET instruction, which resets the other devices */
+    qemu_irq reset_out;
 };
 
 /*
