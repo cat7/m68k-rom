@@ -63,6 +63,7 @@
 #include "ui/console.h"
 #include "ui/pixel_ops.h"
 #include "nubus-video-driver.h"
+#include "nubus-video-init.h"
 #include "trace.h"
 
 #define NV_WINDOW_SIZE      0x100000
@@ -164,7 +165,7 @@ static void nubus_video_build_rom(NubusVideoState *s, uint8_t *buf, int size)
 {
     NubusDeclROM r;
     int dir, dir_board, dir_video;
-    int b_type, b_name, b_vendor, v_id, v_rev, v_part;
+    int b_type, b_name, b_vendor, b_init, v_id, v_rev, v_part;
     int f_type, f_name, f_drvr, f_base, f_len, d_68000, d_68020;
     int f_mode[NUBUS_VIDEO_NDEPTHS], m_params[NUBUS_VIDEO_NDEPTHS];
     int d;
@@ -182,6 +183,7 @@ static void nubus_video_build_rom(NubusVideoState *s, uint8_t *buf, int size)
     b_type = nubus_decl_rom_entry_off(&r, NUBUS_sRsrcType);
     b_name = nubus_decl_rom_entry_off(&r, NUBUS_sRsrcName);
     nubus_decl_rom_entry_data(&r, NUBUS_BoardId, NV_BOARD_ID);
+    b_init = nubus_decl_rom_entry_off(&r, NUBUS_PrimaryInit);
     b_vendor = nubus_decl_rom_entry_off(&r, NUBUS_VendorInfo);
     nubus_decl_rom_end(&r);
 
@@ -254,6 +256,19 @@ static void nubus_video_build_rom(NubusVideoState *s, uint8_t *buf, int size)
     nubus_decl_rom_cstring(&r, "1.0");
     nubus_decl_rom_here(&r, v_part);
     nubus_decl_rom_cstring(&r, "QEMU NuBus Video");
+
+    /*
+     * PrimaryInit sExec block: size, revision 2, CPU 68020, reserved,
+     * offset from here to the code, the code (nubus-video-init.s)
+     */
+    nubus_decl_rom_here(&r, b_init);
+    nubus_decl_rom_long(&r, 12 + sizeof(nubus_video_init));
+    nubus_decl_rom_byte(&r, 2);
+    nubus_decl_rom_byte(&r, 2);
+    nubus_decl_rom_word(&r, 0);
+    nubus_decl_rom_long(&r, 4);
+    nubus_decl_rom_bytes(&r, nubus_video_init, sizeof(nubus_video_init));
+    nubus_decl_rom_align(&r);
 
     /* The driver, for any 68k */
     nubus_decl_rom_here(&r, d_68000);
