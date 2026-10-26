@@ -145,6 +145,7 @@ typedef struct CPUArchState {
     uint32_t mbar;
     uint32_t rambar0;
     uint32_t cacr;
+    uint32_t caar;          /* 68020/68030 cache address register */
     uint32_t sfc;
     uint32_t dfc;
 
@@ -164,10 +165,20 @@ typedef struct CPUArchState {
  *
  * A Motorola 68k CPU.
  */
+/*
+ * Address translation done by the board while the CPU's own MMU is off,
+ * e.g. the Macintosh II's 24-bit mode: returns the physical address of
+ * the page at @addr.
+ */
+typedef hwaddr (*M68kAddrMapFn)(void *opaque, vaddr addr);
+
 struct ArchCPU {
     CPUState parent_obj;
 
     CPUM68KState env;
+
+    M68kAddrMapFn addr_map;
+    void *addr_map_opaque;
 };
 
 /*
@@ -203,6 +214,10 @@ void cpu_m68k_set_ccr(CPUM68KState *env, uint32_t);
 void cpu_m68k_set_sr(CPUM68KState *env, uint32_t);
 void cpu_m68k_restore_fp_status(CPUM68KState *env);
 void cpu_m68k_set_fpcr(CPUM68KState *env, uint32_t val);
+#ifndef CONFIG_USER_ONLY
+/* install or remove (fn NULL) a board address map; flushes the TLB */
+void m68k_cpu_set_addr_map(M68kCPU *cpu, M68kAddrMapFn fn, void *opaque);
+#endif
 uint32_t cpu_m68k_get_fpsr(CPUM68KState *env);
 void cpu_m68k_set_fpsr(CPUM68KState *env, uint32_t val);
 

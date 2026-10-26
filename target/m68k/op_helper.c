@@ -75,6 +75,19 @@ throwaway:
         case 7:
             sp += 52;
             break;
+        case 9:                 /* 68020/030 coprocessor mid-instruction */
+            sp += 12;
+            break;
+        case 0xa:               /* 68020/030 short bus cycle fault */
+            sp += 24;
+            break;
+        case 0xb:               /* 68020/030 long bus cycle fault */
+            /*
+             * The faulted instruction is restarted from the stacked PC
+             * rather than continued from its internal state.
+             */
+            sp += 84;
+            break;
         }
     }
     env->aregs[7] = sp;
@@ -251,6 +264,40 @@ static inline void do_stack_frame(CPUM68KState *env, uint32_t *sp,
     cpu_stw_be_mmuidx_ra(env, *sp, sr, MMU_KERNEL_IDX, 0);
 }
 
+/*
+ * 68020/68030 long bus cycle fault stack frame (format $B, 92 bytes):
+ * the special status word, the fault address and the next instruction's
+ * address; the internal registers are zero. Built from the top down.
+ */
+static void m68020_bus_error_frame(CPUM68KState *env, uint32_t *sp,
+                                   uint16_t oldsr)
+{
+    int i;
+
+    /* internal registers, version number, data input buffer ... */
+    for (i = 0; i < 0x5c - 0x28; i += 4) {
+        *sp -= 4;
+        cpu_stl_be_mmuidx_ra(env, *sp, 0, MMU_KERNEL_IDX, 0);
+    }
+    *sp -= 4;                                   /* +$24 stage B address */
+    cpu_stl_be_mmuidx_ra(env, *sp, env->pc + 4, MMU_KERNEL_IDX, 0);
+    for (i = 0; i < 3; i++) {                   /* +$18 data output buffer */
+        *sp -= 4;
+        cpu_stl_be_mmuidx_ra(env, *sp, 0, MMU_KERNEL_IDX, 0);
+    }
+    *sp -= 4;                                   /* +$14 internal */
+    cpu_stl_be_mmuidx_ra(env, *sp, 0, MMU_KERNEL_IDX, 0);
+    *sp -= 4;                                   /* +$10 data fault address */
+    cpu_stl_be_mmuidx_ra(env, *sp, env->mmu.ar, MMU_KERNEL_IDX, 0);
+    *sp -= 4;                                   /* +$0C pipe stages C, B */
+    cpu_stl_be_mmuidx_ra(env, *sp, 0, MMU_KERNEL_IDX, 0);
+    *sp -= 2;                                   /* +$0A SSW */
+    cpu_stw_be_mmuidx_ra(env, *sp, env->mmu.ssw, MMU_KERNEL_IDX, 0);
+    *sp -= 2;                                   /* +$08 internal */
+    cpu_stw_be_mmuidx_ra(env, *sp, 0, MMU_KERNEL_IDX, 0);
+    do_stack_frame(env, sp, 0xb, oldsr, 0, env->pc);
+}
+
 static void m68k_interrupt_all(CPUM68KState *env, int is_hw)
 {
     CPUState *cs = env_cpu(env);
@@ -301,6 +348,14 @@ static void m68k_interrupt_all(CPUM68KState *env, int is_hw)
 
     switch (cs->exception_index) {
     case EXCP_ACCESS:
+        if (!m68k_feature(env, M68K_FEATURE_M68040)) {
+            m68020_bus_error_frame(env, &sp, oldsr);
+            if (qemu_loglevel_mask(CPU_LOG_INT)) {
+                qemu_log("            ssw:  %04x fault address: %08x\n",
+                         env->mmu.ssw, env->mmu.ar);
+            }
+            break;
+        }
         if (env->mmu.fault) {
             cpu_abort(cs, "DOUBLE MMU FAULT\n");
         }
@@ -475,6 +530,24 @@ void m68k_cpu_transaction_failed(CPUState *cs, hwaddr physaddr, vaddr addr,
 
         env->mmu.ar = addr;
 
+        cs->exception_index = EXCP_ACCESS;
+        cpu_loop_exit(cs);
+    } else if (m68k_feature(env, M68K_FEATURE_M68020) ||
+               m68k_feature(env, M68K_FEATURE_M68030)) {
+        /* 68020/68030 special status word */
+        uint16_t ssw = (env->sr & SR_S) ? 4 : 0;
+
+        if (access_type == MMU_INST_FETCH) {
+            ssw |= 0x5000 | 2;          /* FB, RB: stage B fetch faulted */
+        } else {
+            ssw |= 0x0100 | 1;          /* DF: data cycle faulted */
+            if (access_type != MMU_DATA_STORE) {
+                ssw |= 0x0040;          /* RW: read */
+            }
+            ssw |= (size == 1 ? 1 : size == 2 ? 2 : size == 3 ? 3 : 0) << 4;
+        }
+        env->mmu.ssw = ssw;
+        env->mmu.ar = addr;
         cs->exception_index = EXCP_ACCESS;
         cpu_loop_exit(cs);
     }

@@ -550,6 +550,42 @@ static int cpu_st_float64_ra(CPUM68KState *env, uint32_t addr, FPReg *fp,
     return 8;
 }
 
+/*
+ * 68881/68882 FSAVE: always an idle frame (version $1F, 24 bytes of
+ * internal state), so a context switch saves the registers. 28 bytes.
+ */
+#define FPU881_IDLE_SIZE 0x18
+
+void HELPER(fsave_881)(CPUM68KState *env, uint32_t addr)
+{
+    uintptr_t ra = GETPC();
+    int i;
+
+    cpu_stl_be_data_ra(env, addr, 0x1f000000 | (FPU881_IDLE_SIZE << 16), ra);
+    for (i = 4; i < 4 + FPU881_IDLE_SIZE; i += 4) {
+        cpu_stl_be_data_ra(env, addr + i, 0, ra);
+    }
+}
+
+/* FRESTORE: a null frame resets the FPU; returns the frame's length */
+uint32_t HELPER(frestore_881)(CPUM68KState *env, uint32_t addr)
+{
+    uint32_t frame = cpu_ldl_be_data_ra(env, addr, GETPC());
+    int i;
+
+    if (!(frame >> 24)) {
+        floatx80 nan = floatx80_default_nan(&env->fp_status);
+
+        for (i = 0; i < 8; i++) {
+            env->fregs[i].d = nan;
+        }
+        cpu_m68k_set_fpcr(env, 0);
+        env->fpsr = 0;
+        return 4;
+    }
+    return 4 + ((frame >> 16) & 0xff);
+}
+
 uint32_t HELPER(fmovemx_st_predec)(CPUM68KState *env, uint32_t addr,
                                    uint32_t mask)
 {

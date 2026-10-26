@@ -5367,6 +5367,25 @@ DISAS_INSN(frestore)
     if (m68k_feature(s->env, M68K_FEATURE_M68040)) {
         SRC_EA(env, addr, OS_LONG, 0, NULL);
         /* FIXME: check the state frame */
+    } else if (m68k_feature(s->env, M68K_FEATURE_FPU)) {
+        /* 68881/68882: control modes or (An)+ */
+        TCGv len = tcg_temp_new();
+
+        if (extract32(insn, 3, 3) == 3) {
+            TCGv reg = AREG(insn, 0);
+            TCGv next = tcg_temp_new();
+
+            gen_helper_frestore_881(len, tcg_env, reg);
+            tcg_gen_add_i32(next, reg, len);
+            delay_set_areg(s, REG(insn, 0), next, false);
+            return;
+        }
+        addr = gen_lea(env, s, insn, OS_LONG);
+        if (IS_NULL_QREG(addr)) {
+            gen_addr_fault(s);
+            return;
+        }
+        gen_helper_frestore_881(len, tcg_env, addr);
     } else {
         disas_undef(env, s, insn);
     }
@@ -5383,6 +5402,23 @@ DISAS_INSN(fsave)
         /* always write IDLE */
         TCGv idle = tcg_constant_i32(0x41000000);
         DEST_EA(env, insn, OS_LONG, idle, NULL);
+    } else if (m68k_feature(s->env, M68K_FEATURE_FPU)) {
+        /* 68881/68882: control alterable modes or -(An); a 28-byte frame */
+        TCGv addr;
+
+        if (extract32(insn, 3, 3) == 4) {
+            addr = tcg_temp_new();
+            tcg_gen_subi_i32(addr, AREG(insn, 0), 28);
+            gen_helper_fsave_881(tcg_env, addr);
+            delay_set_areg(s, REG(insn, 0), addr, false);
+            return;
+        }
+        addr = gen_lea(env, s, insn, OS_LONG);
+        if (IS_NULL_QREG(addr)) {
+            gen_addr_fault(s);
+            return;
+        }
+        gen_helper_fsave_881(tcg_env, addr);
     } else {
         disas_undef(env, s, insn);
     }

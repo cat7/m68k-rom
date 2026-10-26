@@ -304,6 +304,7 @@ enum {
 };
 
 static void via1_cuda_tick(MOS6522Q800VIA1State *v1s);
+static void via1_overlay_update(MOS6522Q800VIA1State *v1s);
 
 static void via1_sixty_hz_update(MOS6522Q800VIA1State *v1s)
 {
@@ -1548,7 +1549,7 @@ static uint64_t mos6522_q800_via1_read(void *opaque, hwaddr addr, unsigned size)
     case VIA_REG_A:
     case VIA_REG_ANH:
         /* Machine ID bits, set by the board */
-        ret = (ret & ~VIA1A_CPUID_MASK) | (s->cpuid & VIA1A_CPUID_MASK);
+        ret = (ret & ~s->cpuid_mask) | (s->cpuid & s->cpuid_mask);
         /* Inputs pulled high on the board */
         ret |= s->porta_pullup & ~ms->dira;
         break;
@@ -1592,6 +1593,10 @@ static void mos6522_q800_via1_write(void *opaque, hwaddr addr, uint64_t val,
     case VIA_REG_ANH:
         /* PA5 is the floppy drive head select (SEL) line */
         qemu_set_irq(v1s->headsel_irq, (ms->a & VIA1A_vHeadSel) != 0);
+        via1_overlay_update(v1s);
+        break;
+    case VIA_REG_DIRA:
+        via1_overlay_update(v1s);
         break;
     case VIA_REG_B:
         if (v1s->cuda || v1s->egret) {
@@ -1698,6 +1703,20 @@ static uint64_t mos6522_q800_via2_read(void *opaque, hwaddr addr, unsigned size)
     return val;
 }
 
+/* tell the board the port pin levels: outputs, or high when inputs */
+static void via2_update_ports(MOS6522Q800VIA2State *s)
+{
+    MOS6522State *ms = MOS6522(s);
+    int i;
+
+    for (i = 0; i < 8; i++) {
+        qemu_set_irq(s->port_a_out[i],
+                     !(ms->dira & BIT(i)) || (ms->a & BIT(i)));
+        qemu_set_irq(s->port_b_out[i],
+                     !(ms->dirb & BIT(i)) || (ms->b & BIT(i)));
+    }
+}
+
 static void mos6522_q800_via2_write(void *opaque, hwaddr addr, uint64_t val,
                                     unsigned size)
 {
@@ -1706,6 +1725,15 @@ static void mos6522_q800_via2_write(void *opaque, hwaddr addr, uint64_t val,
 
     addr = (addr >> 9) & 0xf;
     mos6522_write(ms, addr, val, size);
+    switch (addr) {
+    case VIA_REG_A:
+    case VIA_REG_ANH:
+    case VIA_REG_B:
+    case VIA_REG_DIRA:
+    case VIA_REG_DIRB:
+        via2_update_ports(s);
+        break;
+    }
 }
 
 static const MemoryRegionOps mos6522_q800_via2_ops = {
@@ -1717,6 +1745,15 @@ static const MemoryRegionOps mos6522_q800_via2_ops = {
         .max_access_size = 4,
     },
 };
+
+/* PA4 (vOverlay): high, or an input pulled high, maps the ROM at 0 */
+static void via1_overlay_update(MOS6522Q800VIA1State *v1s)
+{
+    MOS6522State *ms = MOS6522(v1s);
+
+    qemu_set_irq(v1s->overlay_irq,
+                 !(ms->dira & VIA1A_vOverlay) || (ms->a & VIA1A_vOverlay));
+}
 
 static void via1_postload_update_cb(void *opaque, bool running, RunState state)
 {
@@ -1785,6 +1822,7 @@ static void mos6522_q800_via1_reset_hold(Object *obj, ResetType type)
     v1s->timer_hack_state = v1s->cuda ? 1 : 0;
 
     qemu_set_irq(v1s->headsel_irq, 0);
+    via1_overlay_update(v1s);
 }
 
 static void mos6522_q800_via1_realize(DeviceState *dev, Error **errp)
@@ -1851,6 +1889,7 @@ static void mos6522_q800_via1_init(Object *obj)
     /* A/UX mode */
     qdev_init_gpio_out(DEVICE(obj), &v1s->auxmode_irq, 1);
     qdev_init_gpio_out_named(DEVICE(obj), &v1s->headsel_irq, "headsel", 1);
+    qdev_init_gpio_out_named(DEVICE(obj), &v1s->overlay_irq, "overlay", 1);
 }
 
 static const VMStateDescription vmstate_q800_via1 = {
@@ -1893,6 +1932,8 @@ static const VMStateDescription vmstate_q800_via1 = {
 static const Property mos6522_q800_via1_properties[] = {
     DEFINE_PROP_DRIVE("drive", MOS6522Q800VIA1State, blk),
     DEFINE_PROP_UINT8("cpuid", MOS6522Q800VIA1State, cpuid, VIA1A_CPUID_Q800),
+    DEFINE_PROP_UINT8("cpuid-mask", MOS6522Q800VIA1State, cpuid_mask,
+                      VIA1A_CPUID_MASK),
     DEFINE_PROP_UINT8("porta-pullup", MOS6522Q800VIA1State, porta_pullup, 0),
     DEFINE_PROP_BOOL("cuda", MOS6522Q800VIA1State, cuda, false),
     DEFINE_PROP_BOOL("egret", MOS6522Q800VIA1State, egret, false),
@@ -1945,6 +1986,7 @@ static void mos6522_q800_via2_reset_hold(Object *obj, ResetType type)
     ms->b = 0;
     ms->dira = 0;
     ms->a = 0x7f;
+    via2_update_ports(MOS6522_Q800_VIA2(obj));
 }
 
 static void via2_nubus_irq_request(void *opaque, int n, int level)
@@ -1975,6 +2017,8 @@ static void mos6522_q800_via2_init(Object *obj)
 
     qdev_init_gpio_in_named(DEVICE(obj), via2_nubus_irq_request, "nubus-irq",
                             VIA2_NUBUS_IRQ_NB);
+    qdev_init_gpio_out_named(DEVICE(obj), v2s->port_a_out, "port-a", 8);
+    qdev_init_gpio_out_named(DEVICE(obj), v2s->port_b_out, "port-b", 8);
 }
 
 static const Property mos6522_q800_via2_properties[] = {

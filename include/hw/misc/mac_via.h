@@ -52,10 +52,12 @@ struct MOS6522Q800VIA1State {
 
     qemu_irq auxmode_irq;
     qemu_irq headsel_irq;
+    qemu_irq overlay_irq;         /* PA4: ROM at address 0 (Mac II) */
     uint8_t last_b;
 
-    /* Machine ID bits returned on port A (VIA1A_CPUID_MASK) */
+    /* Machine ID bits returned on port A (the cpuid_mask bits) */
     uint8_t cpuid;
+    uint8_t cpuid_mask;           /* default VIA1A_CPUID_MASK */
     /* Port A input pins pulled high on the board */
     uint8_t porta_pullup;
 
@@ -149,6 +151,9 @@ struct MOS6522Q800VIA2State {
     MemoryRegion via_mem;
     /* Port B inputs pulled high on the board */
     uint8_t portb_pullup;
+    /* port pin levels for the board (outputs, or high when inputs) */
+    qemu_irq port_a_out[8];
+    qemu_irq port_b_out[8];
 };
 
 #endif

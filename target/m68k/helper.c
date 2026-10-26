@@ -302,8 +302,15 @@ void HELPER(m68k_movec_to)(CPUM68KState *env, uint32_t reg, uint32_t val)
             return;
         }
         break;
-    /* Unimplemented Registers */
     case M68K_CR_CAAR:
+        /* the caches are not modelled: just keep the value */
+        if (m68k_feature(env, M68K_FEATURE_M68020) ||
+            m68k_feature(env, M68K_FEATURE_M68030)) {
+            env->caar = val;
+            return;
+        }
+        break;
+    /* Unimplemented Registers */
     case M68K_CR_PCR:
     case M68K_CR_BUSCR:
         cpu_abort(env_cpu(env),
@@ -406,8 +413,13 @@ uint32_t HELPER(m68k_movec_from)(CPUM68KState *env, uint32_t reg)
             return env->mmu.ttr[M68K_DTTR1];
         }
         break;
-    /* Unimplemented Registers */
     case M68K_CR_CAAR:
+        if (m68k_feature(env, M68K_FEATURE_M68020) ||
+            m68k_feature(env, M68K_FEATURE_M68030)) {
+            return env->caar;
+        }
+        break;
+    /* Unimplemented Registers */
     case M68K_CR_PCR:
     case M68K_CR_BUSCR:
         cpu_abort(env_cpu(env), "Unimplemented control register read 0x%x\n",
@@ -929,6 +941,16 @@ txfail:
     return -1;
 }
 
+void m68k_cpu_set_addr_map(M68kCPU *cpu, M68kAddrMapFn fn, void *opaque)
+{
+    if (cpu->addr_map == fn && cpu->addr_map_opaque == opaque) {
+        return;
+    }
+    cpu->addr_map = fn;
+    cpu->addr_map_opaque = opaque;
+    tlb_flush(CPU(cpu));
+}
+
 bool m68k_cpu_translate_for_debug(CPUState *cs, vaddr addr,
                                   TranslateForDebugResult *result)
 {
@@ -940,7 +962,11 @@ bool m68k_cpu_translate_for_debug(CPUState *cs, vaddr addr,
 
     if ((env->mmu.tcr & M68K_TCR_ENABLED) == 0) {
         /* MMU disabled */
-        phys_addr = addr;
+        M68kCPU *cpu = M68K_CPU(cs);
+
+        phys_addr = cpu->addr_map ?
+            cpu->addr_map(cpu->addr_map_opaque, addr & TARGET_PAGE_MASK) +
+            (addr & ~TARGET_PAGE_MASK) : addr;
         goto success;
     }
 
@@ -996,8 +1022,12 @@ bool m68k_cpu_tlb_fill(CPUState *cs, vaddr address, int size,
 
     if ((env->mmu.tcr & M68K_TCR_ENABLED) == 0) {
         /* MMU disabled */
-        tlb_set_page(cs, address & TARGET_PAGE_MASK,
-                     address & TARGET_PAGE_MASK,
+        M68kCPU *cpu = M68K_CPU(cs);
+        vaddr page = address & TARGET_PAGE_MASK;
+
+        tlb_set_page(cs, page,
+                     cpu->addr_map ?
+                         cpu->addr_map(cpu->addr_map_opaque, page) : page,
                      PAGE_READ | PAGE_WRITE | PAGE_EXEC,
                      mmu_idx, TARGET_PAGE_SIZE);
         return true;
