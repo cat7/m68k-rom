@@ -31,11 +31,11 @@
 #include "hw/core/irq.h"
 #include "hw/core/qdev-properties.h"
 #include "hw/core/sysbus.h"
-#include "hw/misc/unimp.h"
 #include "hw/char/escc.h"
 #include "hw/misc/mac_via.h"
 #include "hw/audio/asc.h"
 #include "hw/block/swim2.h"
+#include "hw/scsi/ncr5380.h"
 #include "hw/nubus/mac-nubus-bridge.h"
 #include "hw/input/adb.h"
 #include "hw/core/or-irq.h"
@@ -97,6 +97,9 @@ struct MacIIMachineState {
     OrIRQState escc_orgate;
     ASCState asc;
     SWIM2State swim;
+    NCR5380State *scsi;
+    MemoryRegion scsi_regs;
+    MemoryRegion scsi_pdma_alias;
     MacNubusBridge nubus_bridge;
 
     uint8_t ram_code;           /* VIA2 PA6-7 */
@@ -225,18 +228,50 @@ static void macii_headsel(void *opaque, int n, int level)
     swim2_set_sel(opaque, level);
 }
 
-/* a logged stand-in for a chip not emulated yet, inside the I/O block */
-static void macii_unimp(MacIIMachineState *m, const char *name, hwaddr offset)
+/* 5380 register window: register n at n * $10; A9 set = pseudo-DMA data */
+static uint64_t macii_scsi_read(void *opaque, hwaddr addr, unsigned size)
 {
-    DeviceState *dev = qdev_new(TYPE_UNIMPLEMENTED_DEVICE);
+    NCR5380State *s = opaque;
+    uint64_t val = 0;
+    unsigned i;
 
-    qdev_prop_set_string(dev, "name", name);
-    qdev_prop_set_uint64(dev, "size", 0x2000);
-    sysbus_realize_and_unref(SYS_BUS_DEVICE(dev), &error_fatal);
-    memory_region_add_subregion(&m->io, offset,
-                                sysbus_mmio_get_region(SYS_BUS_DEVICE(dev),
-                                                       0));
+    if (addr & 0x200) {
+        for (i = 0; i < size; i++) {
+            val = (val << 8) | ncr5380_dma_read(s);
+        }
+        return val;
+    }
+    val = ncr5380_reg_read(s, (addr >> 4) & 7);
+    for (i = 1; i < size; i++) {
+        val |= val << 8;
+    }
+    return val;
 }
+
+static void macii_scsi_write(void *opaque, hwaddr addr, uint64_t val,
+                             unsigned size)
+{
+    NCR5380State *s = opaque;
+    int i;
+
+    if (addr & 0x200) {
+        for (i = size - 1; i >= 0; i--) {
+            ncr5380_dma_write(s, val >> (8 * i));
+        }
+        return;
+    }
+    ncr5380_reg_write(s, (addr >> 4) & 7, val >> (8 * (size - 1)));
+}
+
+static const MemoryRegionOps macii_scsi_ops = {
+    .read = macii_scsi_read,
+    .write = macii_scsi_write,
+    .endianness = DEVICE_BIG_ENDIAN,
+    .valid = {
+        .min_access_size = 1,
+        .max_access_size = 4,
+    },
+};
 
 static void macii_cpu_reset(void *opaque)
 {
@@ -405,10 +440,35 @@ static void macii_machine_init(MachineState *machine)
     sysbus_connect_irq(sysbus, 0, qdev_get_gpio_in(DEVICE(&m->via2),
                                                    VIA2_IRQ_ASC_BIT));
 
-    /* not emulated yet */
-    macii_unimp(m, "macii.scsi-pdma", SCSI_PDMA_OFFSET);
-    macii_unimp(m, "macii.scsi", SCSI_OFFSET);
-    macii_unimp(m, "macii.scsi-hs", SCSI_HS_OFFSET);
+    /*
+     * SCSI: NCR 5380 registers every 16 bytes, A9 selecting pseudo-DMA
+     * data; the hardware-handshake window for blind transfers, also seen
+     * at +$6000. IRQ to VIA2 CB2, DRQ to VIA2 CA2.
+     */
+    dev = qdev_new(TYPE_NCR5380);
+    m->scsi = NCR5380(dev);
+    qdev_prop_set_uint8(dev, "it_shift", 4);
+    sysbus = SYS_BUS_DEVICE(dev);
+    sysbus_realize_and_unref(sysbus, &error_fatal);
+    memory_region_init_io(&m->scsi_regs, OBJECT(m), &macii_scsi_ops, m->scsi,
+                          "macii.scsi", 0x2000);
+    memory_region_add_subregion(&m->io, SCSI_OFFSET, &m->scsi_regs);
+    memory_region_add_subregion(&m->io, SCSI_HS_OFFSET,
+                                sysbus_mmio_get_region(sysbus,
+                                                       NCR5380_MMIO_PDMA));
+    memory_region_init_alias(&m->scsi_pdma_alias, OBJECT(m),
+                             "macii.scsi-pdma",
+                             sysbus_mmio_get_region(sysbus, NCR5380_MMIO_PDMA),
+                             0, 0x2000);
+    memory_region_add_subregion(&m->io, SCSI_PDMA_OFFSET,
+                                &m->scsi_pdma_alias);
+    qdev_connect_gpio_out(dev, NCR5380_GPIO_IRQ,
+                       qemu_irq_invert(qdev_get_gpio_in(DEVICE(&m->via2),
+                                                        VIA2_IRQ_SCSI_BIT)));
+    qdev_connect_gpio_out(dev, NCR5380_GPIO_DRQ,
+                       qemu_irq_invert(qdev_get_gpio_in(DEVICE(&m->via2),
+                                                        VIA2_IRQ_SCSI_DATA_BIT)));
+    scsi_bus_legacy_handle_cmdline(&m->scsi->bus);
 
     /*
      * Floppy: the Mac II has an IWM, which a SWIM in its power-on IWM mode

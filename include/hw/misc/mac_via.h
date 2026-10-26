@@ -85,6 +85,7 @@ struct MOS6522Q800VIA1State {
     uint8_t adb_data_in[128];
     uint8_t adb_data_out[16];
     uint8_t adb_autopoll_cmd;
+    bool adb_new_pending;         /* command state entered before its byte */
 
     /* external timers */
     QEMUTimer *one_second_timer;

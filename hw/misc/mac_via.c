@@ -864,6 +864,13 @@ static void via1_adb_update(MOS6522Q800VIA1State *v1s)
     state = (s->b & VIA1B_vADB_StateMask) >> VIA1B_vADB_StateShift;
 
     if (state != oldstate) {
+        /*
+         * The Mac II ROM enters the command state while the shift
+         * register is still shifting in, then switches it to output and
+         * writes the command byte: send it on that SR write.
+         */
+        v1s->adb_new_pending = state == ADB_STATE_NEW &&
+                               !(s->acr & VIA1ACR_vShiftOut);
         if (s->acr & VIA1ACR_vShiftOut) {
             /* output mode */
             adb_via_send(v1s, state, s->sr);
@@ -1651,7 +1658,12 @@ static void mos6522_q800_via1_write(void *opaque, hwaddr addr, uint64_t val,
                        VIA1B_vADB_StateShift;
             state = (ms->b & VIA1B_vADB_StateMask) >> VIA1B_vADB_StateShift;
 
-            if (v1s->adb && oldstate == ADB_STATE_NEW &&
+            if (v1s->adb && v1s->adb_new_pending &&
+                    state == ADB_STATE_NEW &&
+                    (ms->acr & VIA1ACR_vShiftOut)) {
+                v1s->adb_new_pending = false;
+                adb_via_send(v1s, state, ms->sr);
+            } else if (v1s->adb && oldstate == ADB_STATE_NEW &&
                     state == ADB_STATE_NEW &&
                     (ms->acr & VIA1ACR_vShiftOut) &&
                     oldsr == 0 /* ADB_BUSRESET */) {
