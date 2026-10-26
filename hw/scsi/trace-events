@@ -392,3 +392,21 @@ scsi_generic_ioctl_sgio_command(uint8_t cmd, uint32_t timeout) "generic ioctl sg
 scsi_generic_ioctl_sgio_done(uint8_t cmd, int ret, uint8_t status, uint8_t host_status) "generic ioctl sgio: cmd=0x%x ret=%d status=0x%x host_status=0x%x"
 scsi_generic_persistent_reserve_out_reply(uint8_t service_action, uint8_t resv_type, uint64_t old_key, uint64_t new_key) "persistent reserve out reply service_action=%u resv_type=%u old_key=0x%" PRIx64 " new_key=0x%" PRIx64
 scsi_generic_pr_state_preempt(uint64_t key, uint8_t resv_type) "key=0x%" PRIx64 " resv_type=%u"
+
+# ncr5380.c
+ncr5380_reg_read(const char *reg, uint8_t val) "%s -> 0x%02x"
+ncr5380_reg_write(const char *reg, uint8_t val) "%s <- 0x%02x"
+ncr5380_irq(int level) "IRQ %d"
+ncr5380_drq(int level) "DRQ %d"
+ncr5380_phase(const char *from, const char *to) "target %s -> %s"
+ncr5380_phase_mismatch(uint8_t bus, uint8_t tcr) "phase mismatch: bus %u, TCR %u"
+ncr5380_select(int id, int atn) "selected target %d (ATN %d)"
+ncr5380_disconnect(int id) "target %d disconnected"
+ncr5380_msg_out(uint8_t msg) "message out 0x%02x"
+ncr5380_command(int id, int lun, uint8_t opcode, int len) "target %d lun %d command 0x%02x (%d bytes)"
+ncr5380_transfer_data(uint32_t len) "transfer data %u bytes"
+ncr5380_command_complete(int status, size_t resid) "command complete status 0x%02x resid %zu"
+ncr5380_bus_reset(void) "SCSI bus reset"
+ncr5380_dma_read(uint8_t val, int handshake) "dma read 0x%02x handshake %d"
+ncr5380_dma_write(uint8_t val, int latched) "dma write 0x%02x (latch was full: %d)"
+ncr5380_sync_io(int rounds, int waiting) "waited %d drain rounds, still waiting %d"
