@@ -66,8 +66,6 @@ typedef struct MacfbState {
     uint32_t vram_bit_mask;
     uint32_t palette_current;
     uint8_t color_palette[256 * 3];
-    bool neutral_white;           /* undo the ROM's Page-White gamma */
-    bool page_white;              /* the CLUT holds Page-White colours */
     uint32_t width, height; /* in pixels */
     uint8_t depth;
     uint8_t type;

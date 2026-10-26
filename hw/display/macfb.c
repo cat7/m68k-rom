@@ -170,30 +170,6 @@ static bool macfb_is_mono(MacfbState *s)
            s->type == MACFB_DISPLAY_APPLE_12_MONO;
 }
 
-/*
- * The Quadra 700/900 ROM starts Apple's 16" and 21" colour monitors with
- * its "Page-White Gamma", which warms white to ff f7 d6 to suit those
- * bluish CRTs; on a modern display it looks beige. It is close to Mac Std
- * Gamma with green and blue scaled down, so while the CLUT's white (entry
- * 0) is that colour, scale them back up. Once Mac OS loads another gamma,
- * white changes and this stops.
- */
-#define PAGE_WHITE_G    0xf7
-#define PAGE_WHITE_B    0xd6
-
-static void macfb_check_page_white(MacfbState *s)
-{
-    s->page_white = s->neutral_white && !macfb_is_mono(s) &&
-                    s->color_palette[0] == 0xff &&
-                    s->color_palette[1] == PAGE_WHITE_G &&
-                    s->color_palette[2] == PAGE_WHITE_B;
-}
-
-static inline uint8_t macfb_unwarm(uint8_t v, uint8_t white)
-{
-    return MIN(255, (v * 255 + white / 2) / white);
-}
-
 static inline void macfb_palette_rgb(MacfbState *s, int idx, uint8_t *r,
                                      uint8_t *g, uint8_t *b)
 {
@@ -203,10 +179,6 @@ static inline void macfb_palette_rgb(MacfbState *s, int idx, uint8_t *r,
     } else {
         *r = s->color_palette[idx * 3];
         *g = s->color_palette[idx * 3 + 1];
-        if (s->page_white) {
-            *g = macfb_unwarm(*g, PAGE_WHITE_G);
-            *b = macfb_unwarm(*b, PAGE_WHITE_B);
-        }
     }
 }
 
@@ -353,8 +325,6 @@ static void macfb_draw_graphic(MacfbState *s)
     int y, ymin;
     int macfb_stride = s->mode->stride;
     macfb_draw_line_func *macfb_draw_line;
-
-    macfb_check_page_white(s);
 
     switch (s->depth) {
     case 1:
@@ -939,8 +909,6 @@ static const Property macfb_nubus_properties[] = {
     DEFINE_PROP_UINT8("depth", MacfbNubusState, macfb.depth, 8),
     DEFINE_PROP_UINT8("display", MacfbNubusState, macfb.type,
                       MACFB_DISPLAY_VGA),
-    DEFINE_PROP_BOOL("neutral-white", MacfbNubusState, macfb.neutral_white,
-                     true),
 };
 
 static const VMStateDescription vmstate_macfb_nubus = {
