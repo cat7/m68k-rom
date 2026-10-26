@@ -47,6 +47,7 @@ static const MacQuadraModel lc475_model = {
     .fb_depth = 8,
     /* 512 KiB soldered, 1 MiB with the VRAM SIMM */
     .vram_size = 1 * MiB,
+    .lc_video = true,
 };
 
 static const TypeInfo lc475_machine_types[] = {

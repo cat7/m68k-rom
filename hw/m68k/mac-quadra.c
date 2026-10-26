@@ -701,6 +701,9 @@ static void q800_machine_init(MachineState *machine)
     if (model->vram_size) {
         qdev_prop_set_uint32(dev, "vram-size", model->vram_size);
     }
+    if (model->lc_video) {
+        qdev_prop_set_bit(dev, "lc-layout", true);
+    }
     qdev_realize(dev, BUS(nubus), &error_fatal);
 
     macfb_mode = (NUBUS_MACFB(dev)->macfb).mode;

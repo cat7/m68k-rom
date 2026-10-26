@@ -87,6 +87,7 @@ typedef struct MacQuadraModel {
     uint32_t fb_width, fb_height;
     uint8_t fb_depth;
     uint32_t vram_size;           /* on-board VRAM (0: 4 MiB) */
+    bool lc_video;                /* LC 475 frame layouts (macfb lc-layout) */
 } MacQuadraModel;
 
 struct MacQuadraMachineClass {

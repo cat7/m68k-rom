@@ -120,6 +120,23 @@ static const MacFbMode macfb_mode_table[] = {
     { MACFB_DISPLAY_APPLE_21_COLOR, 8, 0x120, 0x5ff, 1152, 870, 0x480, 0x80 },
 
     /*
+     * The LC 475 ROM programs the Quadra 700 values below, but starts the
+     * 16" and 21" Color pictures at 0x80 rather than 0xe00 (lc-layout).
+     */
+    { MACFB_DISPLAY_16_COLOR, 1, 0xd0, 0x60e, 832, 624, 0x340, 0x80, true },
+    { MACFB_DISPLAY_16_COLOR, 2, 0xd0, 0x606, 832, 624, 0x340, 0x80, true },
+    { MACFB_DISPLAY_16_COLOR, 4, 0xd0, 0x602, 832, 624, 0x340, 0x80, true },
+    { MACFB_DISPLAY_16_COLOR, 8, 0xd0, 0x600, 832, 624, 0x340, 0x80, true },
+    { MACFB_DISPLAY_APPLE_21_COLOR, 1, 0x90, 0x406, 1152, 870, 0x240, 0x80,
+      true },
+    { MACFB_DISPLAY_APPLE_21_COLOR, 2, 0x90, 0x402, 1152, 870, 0x240, 0x80,
+      true },
+    { MACFB_DISPLAY_APPLE_21_COLOR, 4, 0x90, 0x400, 1152, 870, 0x240, 0x80,
+      true },
+    { MACFB_DISPLAY_APPLE_21_COLOR, 8, 0x120, 0x4ff, 1152, 870, 0x480, 0x80,
+      true },
+
+    /*
      * Quadra 700 DAFB modes, as the Quadra 700 ROM programs them for each
      * monitor sense code (CTRL2 bits 11-8 differ from the Quadra 800).
      * Layouts read from the guest's ScreenRow, ScrnBase and main GDevice;
@@ -148,6 +165,29 @@ static const MacFbMode macfb_mode_table[] = {
     { MACFB_DISPLAY_APPLE_21_COLOR, 2, 0x90, 0x402, 1152, 870, 0x240, 0xe00 },
     { MACFB_DISPLAY_APPLE_21_COLOR, 4, 0x90, 0x400, 1152, 870, 0x240, 0xe00 },
     { MACFB_DISPLAY_APPLE_21_COLOR, 8, 0x120, 0x4ff, 1152, 870, 0x480, 0xe00 },
+
+    /*
+     * Quadra 800 modes for the 12" RGB, 15" Portrait and 16" Color
+     * monitors, as its ROM programs them (the same CTRL1 values
+     * as the Quadra 700, CTRL2 bits 11-8 = 0x7). Layouts read from the
+     * guest's ScreenRow, ScrnBase and main GDevice, as above.
+     */
+    { MACFB_DISPLAY_APPLE_12_RGB, 1, 0x100, 0x71e, 512, 384, 0x400, 0x1000 },
+    { MACFB_DISPLAY_APPLE_12_RGB, 2, 0x100, 0x70e, 512, 384, 0x400, 0x1000 },
+    { MACFB_DISPLAY_APPLE_12_RGB, 4, 0x100, 0x706, 512, 384, 0x400, 0x1000 },
+    { MACFB_DISPLAY_APPLE_12_RGB, 8, 0x100, 0x702, 512, 384, 0x400, 0x1000 },
+    { MACFB_DISPLAY_APPLE_12_RGB, 24, 0x200, 0x7ff, 512, 384, 0x800, 0x1000 },
+    { MACFB_DISPLAY_APPLE_PORTRAIT, 1, 0x80, 0x70e, 640, 870, 0x200, 0x1000 },
+    { MACFB_DISPLAY_APPLE_PORTRAIT, 2, 0x80, 0x706, 640, 870, 0x200, 0x1000 },
+    { MACFB_DISPLAY_APPLE_PORTRAIT, 4, 0x80, 0x702, 640, 870, 0x200, 0x1000 },
+    { MACFB_DISPLAY_APPLE_PORTRAIT, 8, 0x100, 0x700, 640, 870, 0x400, 0x1000 },
+    { MACFB_DISPLAY_16_COLOR, 1, 0xd0, 0x70e, 832, 624, 0x340, 0xe00 },
+    { MACFB_DISPLAY_16_COLOR, 2, 0xd0, 0x706, 832, 624, 0x340, 0xe00 },
+    { MACFB_DISPLAY_16_COLOR, 4, 0xd0, 0x702, 832, 624, 0x340, 0xe00 },
+    { MACFB_DISPLAY_16_COLOR, 8, 0xd0, 0x700, 832, 624, 0x340, 0xe00 },
+    { MACFB_DISPLAY_16_COLOR, 24, 0x340, 0x100, 832, 624, 0xd00, 0xe00 },
+    /* this ROM sets the 21" monitor's 1 bpp mode this way too */
+    { MACFB_DISPLAY_APPLE_21_COLOR, 1, 0x90, 0x706, 1152, 870, 0x240, 0x80 },
 };
 
 typedef void macfb_draw_line_func(MacfbState *s, uint8_t *d, uint32_t addr,
@@ -451,7 +491,8 @@ static void macfb_mode_write(MacfbState *s)
     for (i = 0; i < ARRAY_SIZE(macfb_mode_table); i++) {
         macfb_mode = &macfb_mode_table[i];
 
-        if (s->type != macfb_mode->type) {
+        if (s->type != macfb_mode->type ||
+            (macfb_mode->lc && !s->lc_layout)) {
             continue;
         }
 
@@ -732,7 +773,7 @@ static bool macfb_common_realize(DeviceState *dev, MacfbState *s, Error **errp)
             const MacFbMode *m = &macfb_mode_table[i];
 
             if (m->width == s->width && m->height == s->height &&
-                m->depth == s->depth) {
+                m->depth == s->depth && (!m->lc || s->lc_layout)) {
                 s->type = m->type;
                 s->mode = m;
                 break;
@@ -904,6 +945,7 @@ static const Property macfb_nubus_properties[] = {
     DEFINE_PROP_UINT32("vram-size", MacfbNubusState, macfb.vram_size,
                        MACFB_VRAM_WINDOW),
     DEFINE_PROP_UINT32("config-strap", MacfbNubusState, macfb.config_strap, 0),
+    DEFINE_PROP_BOOL("lc-layout", MacfbNubusState, macfb.lc_layout, false),
     DEFINE_PROP_UINT32("width", MacfbNubusState, macfb.width, 640),
     DEFINE_PROP_UINT32("height", MacfbNubusState, macfb.height, 480),
     DEFINE_PROP_UINT8("depth", MacfbNubusState, macfb.depth, 8),

@@ -47,6 +47,7 @@ typedef struct MacFbMode {
     uint32_t height;
     uint32_t stride;
     uint32_t offset;
+    bool lc;                      /* LC 475 layout: only with lc-layout */
 } MacFbMode;
 
 #define MACFB_CTRL_TOPADDR  0x200
@@ -71,6 +72,7 @@ typedef struct MacfbState {
     uint8_t type;
 
     uint32_t regs[MACFB_NUM_REGS];
+    bool lc_layout;               /* the LC 475 ROM's frame layouts */
     const MacFbMode *mode;
 
     QEMUTimer *vbl_timer;
