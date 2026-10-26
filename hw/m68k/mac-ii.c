@@ -39,6 +39,7 @@
 #include "hw/nubus/mac-nubus-bridge.h"
 #include "hw/input/adb.h"
 #include "hw/core/or-irq.h"
+#include "hw/nubus/nubus-video.h"
 #include "target/m68k/cpu.h"
 #include "qom/object.h"
 
@@ -293,6 +294,21 @@ static void macii_machine_reset(MachineState *machine, ResetType type)
     macii_cpu_reset(m);
 }
 
+
+/* The RESET instruction cold-resets the NuBus cards, as on a real restart */
+static void macii_reset_out(void *opaque, int n, int level)
+{
+    BusState *bus = qdev_get_child_bus(DEVICE(opaque), "nubus-bus.0");
+    BusChild *kid;
+
+    if (!level) {
+        return;
+    }
+    QTAILQ_FOREACH(kid, &bus->children, sibling) {
+        device_cold_reset(kid->child);
+    }
+}
+
 static void macii_machine_init(MachineState *machine)
 {
     MacIIMachineState *m = MACII_MACHINE(machine);
@@ -502,6 +518,23 @@ static void macii_machine_init(MachineState *machine)
                               qdev_get_gpio_in_named(DEVICE(&m->via2),
                                                      "nubus-irq",
                                                      VIA2_NUBUS_IRQ_9 + i));
+    }
+
+
+    qdev_connect_gpio_out_named(DEVICE(&m->cpu), "reset-out", 0,
+                                qemu_allocate_irq(macii_reset_out,
+                                                  &m->nubus_bridge, 0));
+
+    /* our own video card in slot 9, unless -nodefaults */
+    if (defaults_enabled()) {
+        dev = qdev_new(TYPE_NUBUS_VIDEO);
+        qdev_prop_set_uint32(dev, "slot", 9);
+        if (graphic_width && graphic_height) {
+            qdev_prop_set_uint32(dev, "width", graphic_width);
+            qdev_prop_set_uint32(dev, "height", graphic_height);
+        }
+        qdev_realize_and_unref(dev, BUS(&m->nubus_bridge.parent_obj.bus),
+                               &error_fatal);
     }
 
     m->mode32 = true;
