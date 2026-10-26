@@ -4642,6 +4642,143 @@ DISAS_INSN(ptest)
     is_read = tcg_constant_i32((insn >> 5) & 1);
     gen_helper_ptest(tcg_env, AREG(insn, 0), is_read);
 }
+
+/*
+ * 68030 on-chip PMMU (cpID 0 general instructions).  A 68020 with a 68851
+ * would add PVALID, the PMMU registers CAL, VAL, SCC, AC, BADx, BACx,
+ * PSAVE/PRESTORE and the PMMU condition instructions on top of this.
+ */
+static bool pmmu030_ea_ok(uint16_t insn, bool alterable)
+{
+    int mode = extract32(insn, 3, 3);
+    int reg0 = REG(insn, 0);
+
+    switch (mode) {
+    case 2: /* (An) */
+    case 5: /* (d16,An) */
+    case 6: /* (d8,An,Xn) etc. */
+        return true;
+    case 7:
+        /* absolute; the PC relative modes are only read */
+        return reg0 <= 1 || (!alterable && reg0 <= 3);
+    default:
+        return false;
+    }
+}
+
+/* the function code operand of PFLUSH, PLOAD and PTEST, or NULL_QREG */
+static TCGv gen_pmmu030_fc(DisasContext *s, uint16_t ext)
+{
+    int fc = ext & 0x1f;
+    TCGv tmp;
+
+    if ((fc & 0x18) == 0x10) {          /* #immediate */
+        return tcg_constant_i32(fc & 7);
+    }
+    tmp = tcg_temp_new();
+    if ((fc & 0x18) == 0x08) {          /* Dn */
+        tcg_gen_andi_i32(tmp, DREG(fc, 0), 7);
+    } else if (fc == 0) {               /* SFC */
+        tcg_gen_ld_i32(tmp, tcg_env, offsetof(CPUM68KState, sfc));
+    } else if (fc == 1) {               /* DFC */
+        tcg_gen_ld_i32(tmp, tcg_env, offsetof(CPUM68KState, dfc));
+    } else {
+        return NULL_QREG;
+    }
+    return tmp;
+}
+
+DISAS_INSN(pmmu030)
+{
+    uint16_t ext;
+    int preg;
+    bool to_mem;
+    TCGv addr, fc;
+
+    if (IS_USER(s)) {
+        gen_exception(s, s->base.pc_next, EXCP_PRIVILEGE);
+        return;
+    }
+    ext = read_im16(env, s);
+    preg = extract32(ext, 10, 3);
+    to_mem = ext & 0x200;
+
+    switch (ext >> 13) {
+    case 0: /* PMOVE TT0/TT1 */
+    case 2: /* PMOVE TC/SRP/CRP */
+    case 3: /* PMOVE MMUSR */
+        if ((ext & 0xff) ||
+            ((ext >> 13) == 0 && preg != 2 && preg != 3) ||
+            ((ext >> 13) == 2 && preg != 0 && preg != 2 && preg != 3) ||
+            ((ext >> 13) == 3 && (preg != 0 || (ext & 0x100))) ||
+            !pmmu030_ea_ok(insn, to_mem)) {
+            break;
+        }
+        addr = gen_lea(env, s, insn, OS_LONG);
+        if (IS_NULL_QREG(addr)) {
+            break;
+        }
+        gen_helper_pmove030(tcg_env, tcg_constant_i32(ext), addr,
+                            tcg_constant_i32(s->pc));
+        if (!to_mem) {
+            gen_exit_tb(s);
+        }
+        return;
+    case 1: /* PFLUSH, PLOAD */
+        fc = gen_pmmu030_fc(s, ext);
+        if (preg == 1 && (ext & 0x3ff) == 0) {
+            /* PFLUSHA */
+            gen_helper_pflush030(tcg_env);
+            gen_exit_tb(s);
+            return;
+        }
+        if (IS_NULL_QREG(fc)) {
+            break;
+        }
+        if (preg == 0 && (ext & 0x1e0) == 0) {
+            /* PLOAD R/W FC,<ea> */
+            if (!pmmu030_ea_ok(insn, true)) {
+                break;
+            }
+            addr = gen_lea(env, s, insn, OS_LONG);
+            gen_helper_pload030(tcg_env, addr, fc,
+                                tcg_constant_i32(to_mem));
+            return;
+        }
+        if ((preg == 4 || preg == 6) && !(ext & 0x300)) {
+            /* PFLUSH FC,#mask[,<ea>] */
+            if (preg == 6) {
+                if (!pmmu030_ea_ok(insn, true)) {
+                    break;
+                }
+                gen_lea(env, s, insn, OS_LONG);
+            }
+            gen_helper_pflush030(tcg_env);
+            gen_exit_tb(s);
+            return;
+        }
+        break;
+    case 4: /* PTEST R/W FC,<ea>,#level[,An] */
+        fc = gen_pmmu030_fc(s, ext);
+        if (IS_NULL_QREG(fc) || (preg == 0 && (ext & 0x100)) ||
+            !pmmu030_ea_ok(insn, true)) {
+            break;
+        }
+        addr = gen_lea(env, s, insn, OS_LONG);
+        {
+            TCGv desc = tcg_temp_new();
+
+            gen_helper_ptest030(desc, tcg_env, addr, fc,
+                                tcg_constant_i32(ext));
+            if (ext & 0x100) {
+                delay_set_areg(s, extract32(ext, 5, 3), desc, true);
+            }
+        }
+        return;
+    }
+    /* undefined cpID 0 instruction */
+    gen_exception(s, s->base.pc_next, EXCP_LINEF);
+}
 #endif
 
 DISAS_INSN(wddata)
@@ -6041,6 +6178,7 @@ void register_m68k_insns (CPUM68KState *env)
     INSN(cinv,      f400, ff20, M68040);
     INSN(pflush,    f500, ffe0, M68040);
     INSN(ptest,     f548, ffd8, M68040);
+    INSN(pmmu030,   f000, ffc0, M68030);
     INSN(wddata,    fb00, ff00, CF_ISA_A);
     INSN(wdebug,    fbc0, ffc0, CF_ISA_A);
 #endif
@@ -6246,5 +6384,12 @@ void m68k_cpu_dump_state(CPUState *cs, FILE *f, int flags)
                  env->mmu.ttr[M68K_ITTR0], env->mmu.ttr[M68K_ITTR1]);
     qemu_fprintf(f, "MMUSR %08x, fault at %08x\n",
                  env->mmu.mmusr, env->mmu.ar);
+    if (m68k_feature(env, M68K_FEATURE_M68030)) {
+        qemu_fprintf(f, "TC %08x CRP %016" PRIx64 " SRP %016" PRIx64
+                     " TT0/1 %08x/%08x MMUSR %04x\n",
+                     env->mmu.tc030, env->mmu.crp030, env->mmu.srp030,
+                     env->mmu.tt030[0], env->mmu.tt030[1],
+                     env->mmu.mmusr030);
+    }
 #endif /* !CONFIG_USER_ONLY */
 }

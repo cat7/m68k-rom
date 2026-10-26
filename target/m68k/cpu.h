@@ -138,6 +138,12 @@ typedef struct CPUArchState {
         bool fault;
         uint32_t ttr[4];
         uint32_t mmusr;
+        /* 68030 on-chip PMMU */
+        uint32_t tc030;
+        uint64_t crp030;
+        uint64_t srp030;
+        uint32_t tt030[2];
+        uint16_t mmusr030;
     } mmu;
 
     /* Control registers.  */
@@ -217,6 +223,9 @@ void cpu_m68k_set_fpcr(CPUM68KState *env, uint32_t val);
 #ifndef CONFIG_USER_ONLY
 /* install or remove (fn NULL) a board address map; flushes the TLB */
 void m68k_cpu_set_addr_map(M68kCPU *cpu, M68kAddrMapFn fn, void *opaque);
+/* record a 68020/68030 bus error or MMU fault for the format $B frame */
+void m68020_set_fault(CPUM68KState *env, vaddr addr, unsigned size,
+                      MMUAccessType access_type, int mmu_idx);
 #endif
 uint32_t cpu_m68k_get_fpsr(CPUM68KState *env);
 void cpu_m68k_set_fpsr(CPUM68KState *env, uint32_t val);
@@ -325,6 +334,27 @@ typedef enum {
 /* bits for 68040 MMU Translation Control Register */
 #define M68K_TCR_ENABLED 0x8000
 #define M68K_TCR_PAGE_8K 0x4000
+
+/* 68030 MMU translation control register */
+#define M68K_TC030_E        0x80000000
+#define M68K_TC030_SRE      0x02000000
+#define M68K_TC030_FCL      0x01000000
+
+/* 68030 transparent translation registers */
+#define M68K_TT030_E        0x00008000
+#define M68K_TT030_CI       0x00000400
+#define M68K_TT030_RW       0x00000200
+#define M68K_TT030_RWM      0x00000100
+
+/* 68030 MMU status register */
+#define M68K_MMUSR030_B     0x8000  /* bus error during the table search */
+#define M68K_MMUSR030_L     0x4000  /* limit violation */
+#define M68K_MMUSR030_S     0x2000  /* supervisor only */
+#define M68K_MMUSR030_W     0x0800  /* write protected */
+#define M68K_MMUSR030_I     0x0400  /* invalid */
+#define M68K_MMUSR030_M     0x0200  /* modified */
+#define M68K_MMUSR030_T     0x0040  /* transparent translation */
+#define M68K_MMUSR030_N     0x0007  /* number of levels */
 
 /* bits for 68040 MMU Table Descriptor / Page Descriptor / TTR */
 #define M68K_DESC_WRITEPROT 0x00000004

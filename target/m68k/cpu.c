@@ -615,6 +615,30 @@ const VMStateDescription vmstate_68040_mmu = {
     }
 };
 
+static bool cpu_68030_mmu_needed(void *opaque)
+{
+    M68kCPU *s = opaque;
+
+    return m68k_feature(&s->env, M68K_FEATURE_M68030);
+}
+
+static const VMStateDescription vmstate_68030_mmu = {
+    .name = "cpu/68030_mmu",
+    .version_id = 1,
+    .minimum_version_id = 1,
+    .needed = cpu_68030_mmu_needed,
+    .fields = (const VMStateField[]) {
+        VMSTATE_UINT32(env.mmu.ar, M68kCPU),
+        VMSTATE_UINT32(env.mmu.ssw, M68kCPU),
+        VMSTATE_UINT32(env.mmu.tc030, M68kCPU),
+        VMSTATE_UINT64(env.mmu.crp030, M68kCPU),
+        VMSTATE_UINT64(env.mmu.srp030, M68kCPU),
+        VMSTATE_UINT32_ARRAY(env.mmu.tt030, M68kCPU, 2),
+        VMSTATE_UINT16(env.mmu.mmusr030, M68kCPU),
+        VMSTATE_END_OF_LIST()
+    }
+};
+
 static bool cpu_68040_spregs_needed(void *opaque)
 {
     M68kCPU *s = opaque;
@@ -661,6 +685,7 @@ static const VMStateDescription vmstate_m68k_cpu = {
         &vmmstate_fpu,
         &vmstate_cf_spregs,
         &vmstate_68040_mmu,
+        &vmstate_68030_mmu,
         &vmstate_68040_spregs,
         NULL
     },

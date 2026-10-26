@@ -279,8 +279,14 @@ static void m68020_bus_error_frame(CPUM68KState *env, uint32_t *sp,
         *sp -= 4;
         cpu_stl_be_mmuidx_ra(env, *sp, 0, MMU_KERNEL_IDX, 0);
     }
-    *sp -= 4;                                   /* +$24 stage B address */
-    cpu_stl_be_mmuidx_ra(env, *sp, env->pc + 4, MMU_KERNEL_IDX, 0);
+    /*
+     * +$24 stage B address: for a faulted prefetch, the address that
+     * faulted (instructions are restarted from the stacked PC anyway).
+     */
+    *sp -= 4;
+    cpu_stl_be_mmuidx_ra(env, *sp,
+                         (env->mmu.ssw & 0x1000) ? env->mmu.ar : env->pc + 4,
+                         MMU_KERNEL_IDX, 0);
     for (i = 0; i < 3; i++) {                   /* +$18 data output buffer */
         *sp -= 4;
         cpu_stl_be_mmuidx_ra(env, *sp, 0, MMU_KERNEL_IDX, 0);
@@ -534,23 +540,33 @@ void m68k_cpu_transaction_failed(CPUState *cs, hwaddr physaddr, vaddr addr,
         cpu_loop_exit(cs);
     } else if (m68k_feature(env, M68K_FEATURE_M68020) ||
                m68k_feature(env, M68K_FEATURE_M68030)) {
-        /* 68020/68030 special status word */
-        uint16_t ssw = (env->sr & SR_S) ? 4 : 0;
-
-        if (access_type == MMU_INST_FETCH) {
-            ssw |= 0x5000 | 2;          /* FB, RB: stage B fetch faulted */
-        } else {
-            ssw |= 0x0100 | 1;          /* DF: data cycle faulted */
-            if (access_type != MMU_DATA_STORE) {
-                ssw |= 0x0040;          /* RW: read */
-            }
-            ssw |= (size == 1 ? 1 : size == 2 ? 2 : size == 3 ? 3 : 0) << 4;
-        }
-        env->mmu.ssw = ssw;
-        env->mmu.ar = addr;
+        m68020_set_fault(env, addr, size, access_type, mmu_idx);
         cs->exception_index = EXCP_ACCESS;
         cpu_loop_exit(cs);
     }
+}
+
+/*
+ * 68020/68030 special status word for a faulted bus cycle, used for both
+ * bus errors and 68030 MMU faults (the 68030 reports both the same way).
+ */
+void m68020_set_fault(CPUM68KState *env, vaddr addr, unsigned size,
+                      MMUAccessType access_type, int mmu_idx)
+{
+    /* function code: user/supervisor, data/program */
+    uint16_t ssw = mmu_idx == MMU_USER_IDX ? 0 : 4;
+
+    if (access_type == MMU_INST_FETCH) {
+        ssw |= 0x5000 | 2;          /* FB, RB: stage B fetch faulted */
+    } else {
+        ssw |= 0x0100 | 1;          /* DF: data cycle faulted */
+        if (access_type != MMU_DATA_STORE) {
+            ssw |= 0x0040;          /* RW: read */
+        }
+        ssw |= (size == 1 ? 1 : size == 2 ? 2 : size == 3 ? 3 : 0) << 4;
+    }
+    env->mmu.ssw = ssw;
+    env->mmu.ar = addr;
 }
 
 bool m68k_cpu_exec_interrupt(CPUState *cs, int interrupt_request)

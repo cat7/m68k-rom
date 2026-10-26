@@ -26,6 +26,8 @@
 #include "exec/gdbstub.h"
 #include "exec/helper-proto.h"
 #include "accel/tcg/cpu-loop.h"
+#include "accel/tcg/cpu-ldst.h"
+#include "qemu/log.h"
 #include "system/memory.h"
 #include "gdbstub/helpers.h"
 #include "fpu/softfloat.h"
@@ -493,6 +495,8 @@ void m68k_switch_sp(CPUM68KState *env)
 #if !defined(CONFIG_USER_ONLY)
 /* MMU: 68040 only */
 
+static void m68030_dump_mmu(CPUM68KState *env);
+
 static void print_address_zone(uint32_t logical, uint32_t physical,
                                uint32_t size, int attr)
 {
@@ -645,6 +649,10 @@ static void dump_ttr(uint32_t ttr)
 
 void dump_mmu(CPUM68KState *env)
 {
+    if (m68k_feature(env, M68K_FEATURE_M68030)) {
+        m68030_dump_mmu(env);
+        return;
+    }
     if ((env->mmu.tcr & M68K_TCR_ENABLED) == 0) {
         qemu_printf("Translation disabled\n");
         return;
@@ -941,6 +949,453 @@ txfail:
     return -1;
 }
 
+/* MMU: 68030 on-chip PMMU */
+
+/* 68030 descriptor types */
+#define M68030_DT_INVALID   0
+#define M68030_DT_PAGE      1
+#define M68030_DT_SHORT     2
+#define M68030_DT_LONG      3
+
+typedef struct M68030Walk {
+    uint32_t physical;
+    uint32_t desc_addr;     /* address of the last descriptor fetched */
+    bool resolved;          /* a page (or early termination) was found */
+} M68030Walk;
+
+static bool m68030_tt_match(CPUM68KState *env, uint32_t addr, int fc,
+                            bool write)
+{
+    int i;
+
+    for (i = 0; i < 2; i++) {
+        uint32_t tt = env->mmu.tt030[i];
+
+        if (!(tt & M68K_TT030_E)) {
+            continue;
+        }
+        /* logical address base/mask against A31-A24 */
+        if (((addr >> 24) ^ (tt >> 24)) & ~(tt >> 16) & 0xff) {
+            continue;
+        }
+        /* function code base/mask */
+        if ((fc ^ (tt >> 4)) & ~tt & 7) {
+            continue;
+        }
+        /* R/W selects reads (1) or writes (0) unless RWM is set */
+        if (!(tt & M68K_TT030_RWM) && !(tt & M68K_TT030_RW) != write) {
+            continue;
+        }
+        return true;
+    }
+    return false;
+}
+
+static bool m68030_tc_valid(uint32_t tc)
+{
+    int ps = extract32(tc, 20, 4);
+    int bits = ps + extract32(tc, 16, 4);
+    int i;
+
+    if (ps < 8) {
+        return false;
+    }
+    for (i = 12; i >= 0; i -= 4) {
+        int ti = extract32(tc, i, 4);
+
+        if (!ti) {
+            break;
+        }
+        bits += ti;
+    }
+    return bits == 32;
+}
+
+static bool m68030_load_desc(CPUState *cs, uint32_t addr, bool long_desc,
+                             uint32_t *d0, uint32_t *d1)
+{
+    MemTxResult txres;
+
+    *d0 = address_space_ldl(cs->as, addr, MEMTXATTRS_UNSPECIFIED, &txres);
+    if (txres != MEMTX_OK) {
+        return false;
+    }
+    if (!long_desc) {
+        *d1 = *d0;
+        return true;
+    }
+    *d1 = address_space_ldl(cs->as, addr + 4, MEMTXATTRS_UNSPECIFIED, &txres);
+    return txres == MEMTX_OK;
+}
+
+/*
+ * Search the 68030 translation tables for @addr in function code @fc.
+ * @levels is the maximum number of descriptors fetched (PTEST #level),
+ * @update sets the U and M bits of the descriptors.
+ * Returns the MMUSR bits describing the search (W and S are accumulated
+ * over all the levels, N is the number of descriptors fetched).
+ */
+static uint16_t m68030_walk(CPUM68KState *env, uint32_t addr, int fc,
+                            bool write, int levels, bool update,
+                            M68030Walk *w)
+{
+    CPUState *cs = env_cpu(env);
+    uint32_t tc = env->mmu.tc030;
+    int ps = extract32(tc, 20, 4);
+    bool super = fc & 4;
+    int ti[4];
+    int nti = 0;
+    uint64_t root;
+    uint32_t table, limit_word, d0, d1;
+    bool has_limit;
+    int dt, rem, step, n = 0;
+    uint16_t sr = 0;
+    int i;
+
+    for (i = 12; i >= 0; i -= 4) {
+        ti[nti] = extract32(tc, i, 4);
+        if (!ti[nti]) {
+            break;
+        }
+        nti++;
+    }
+
+    w->resolved = false;
+    w->desc_addr = 0;
+    w->physical = addr;
+
+    /* the root pointer is a long format table descriptor */
+    root = ((tc & M68K_TC030_SRE) && super) ? env->mmu.srp030
+                                            : env->mmu.crp030;
+    limit_word = root >> 32;
+    has_limit = true;
+    dt = limit_word & 3;
+    table = root & ~0xfULL;
+    /* the bits of the address that remain to be translated */
+    rem = 32 - extract32(tc, 16, 4);
+    /* step -1 is the function code lookup level */
+    step = (tc & M68K_TC030_FCL) ? -1 : 0;
+
+    for (;;) {
+        bool have_next = step < nti;
+        bool long_desc, last;
+        int width = 0, index = 0, ndt;
+        uint32_t daddr;
+
+        if (dt == M68030_DT_INVALID) {
+            sr |= M68K_MMUSR030_I;
+            break;
+        }
+        if (have_next) {
+            if (step < 0) {
+                index = fc;
+            } else {
+                width = ti[step];
+                if (width > rem) {
+                    /* inconsistent TC */
+                    sr |= M68K_MMUSR030_I;
+                    break;
+                }
+                index = extract32(addr, rem - width, width);
+            }
+            if (has_limit) {
+                int limit = extract32(limit_word, 16, 15);
+
+                if ((limit_word & 0x80000000) ? index < limit
+                                              : index > limit) {
+                    sr |= M68K_MMUSR030_L | M68K_MMUSR030_I;
+                    break;
+                }
+            }
+        }
+        if (dt == M68030_DT_PAGE) {
+            /* page, or early termination: the rest is the page offset */
+            uint32_t offset_mask = rem >= 32 ? ~0u : (1u << rem) - 1;
+
+            w->physical = (table & ~((1u << ps) - 1)) + (addr & offset_mask);
+            w->resolved = true;
+            break;
+        }
+        if (!have_next || n >= levels) {
+            /* PTEST level reached (tables at the last level are indirect) */
+            break;
+        }
+
+        long_desc = dt == M68030_DT_LONG;
+        daddr = table + (index << (long_desc ? 3 : 2));
+        n++;
+        if (!m68030_load_desc(cs, daddr, long_desc, &d0, &d1)) {
+            sr |= M68K_MMUSR030_B | M68K_MMUSR030_I;
+            w->desc_addr = daddr;
+            break;
+        }
+        rem -= width;
+        step++;
+        last = step == nti;
+        ndt = d0 & 3;
+        if (last && (ndt == M68030_DT_SHORT || ndt == M68030_DT_LONG)) {
+            /* indirect descriptor: points to the page descriptor */
+            daddr = d1 & ~3;
+            long_desc = ndt == M68030_DT_LONG;
+            n++;
+            if (!m68030_load_desc(cs, daddr, long_desc, &d0, &d1)) {
+                sr |= M68K_MMUSR030_B | M68K_MMUSR030_I;
+                w->desc_addr = daddr;
+                break;
+            }
+            ndt = d0 & 3;
+            if (ndt != M68030_DT_PAGE) {
+                ndt = M68030_DT_INVALID;
+            }
+        }
+        w->desc_addr = daddr;
+        if (ndt == M68030_DT_INVALID) {
+            sr |= M68K_MMUSR030_I;
+            break;
+        }
+        if (d0 & M68K_DESC_WRITEPROT) {
+            sr |= M68K_MMUSR030_W;
+        }
+        if (long_desc && (d0 & M68K_DESC_SUPERONLY)) {
+            sr |= M68K_MMUSR030_S;
+        }
+        if (update) {
+            uint32_t nd0 = d0 | M68K_DESC_USED;
+
+            if (ndt == M68030_DT_PAGE && write &&
+                !(sr & M68K_MMUSR030_W) &&
+                (super || !(sr & M68K_MMUSR030_S))) {
+                nd0 |= M68K_DESC_MODIFIED;
+            }
+            if (nd0 != d0) {
+                address_space_stl(cs->as, daddr, nd0,
+                                  MEMTXATTRS_UNSPECIFIED, NULL);
+                d0 = nd0;
+            }
+        }
+        if (ndt == M68030_DT_PAGE) {
+            if (d0 & M68K_DESC_MODIFIED) {
+                sr |= M68K_MMUSR030_M;
+            }
+            table = d1 & ~0xffu;
+            /* early termination long page descriptors have a limit */
+            has_limit = long_desc && !last;
+        } else {
+            table = d1 & ~0xfu;
+            has_limit = long_desc;
+        }
+        limit_word = d0;
+        dt = ndt;
+    }
+
+    return sr | MIN(n, 7);
+}
+
+/* is the access allowed by the result of a table search? */
+static bool m68030_access_ok(uint16_t sr, const M68030Walk *w, bool super,
+                             bool write)
+{
+    if (!w->resolved || (sr & M68K_MMUSR030_I)) {
+        return false;
+    }
+    if (!super && (sr & M68K_MMUSR030_S)) {
+        return false;
+    }
+    return !(write && (sr & M68K_MMUSR030_W));
+}
+
+static bool m68030_tlb_fill(CPUState *cs, vaddr address, int size,
+                            MMUAccessType access_type, int mmu_idx,
+                            bool probe, uintptr_t retaddr)
+{
+    CPUM68KState *env = cpu_env(cs);
+    bool super = mmu_idx != MMU_USER_IDX;
+    bool write = access_type == MMU_DATA_STORE;
+    bool fetch = access_type == MMU_INST_FETCH;
+    bool split = env->mmu.tc030 & M68K_TC030_FCL;
+    int dfc = super ? 5 : 1;
+    int pfc = super ? 6 : 2;
+    M68030Walk w;
+    uint16_t sr;
+    int prot, ps;
+    vaddr vpage;
+    hwaddr ppage;
+
+    if (m68030_tt_match(env, address, fetch ? pfc : dfc, write)) {
+        /* transparent: allow the other kinds of access the TTs match */
+        prot = 0;
+        if (m68030_tt_match(env, address, dfc, false)) {
+            prot |= PAGE_READ;
+        }
+        if (m68030_tt_match(env, address, dfc, true)) {
+            prot |= PAGE_WRITE;
+        }
+        if (m68030_tt_match(env, address, pfc, false)) {
+            prot |= PAGE_EXEC;
+        }
+        tlb_set_page(cs, address & TARGET_PAGE_MASK,
+                     address & TARGET_PAGE_MASK, prot, mmu_idx,
+                     TARGET_PAGE_SIZE);
+        return true;
+    }
+
+    sr = m68030_walk(env, address, fetch ? pfc : dfc, write, 16, true, &w);
+    if (!m68030_access_ok(sr, &w, super, write)) {
+        if (probe) {
+            return false;
+        }
+        /* the 68030 reports MMU faults as bus errors */
+        m68020_set_fault(env, address, size, access_type, mmu_idx);
+        cs->exception_index = EXCP_ACCESS;
+        cpu_loop_exit_restore(cs, retaddr);
+    }
+
+    /*
+     * Only grant the other kinds of access when they translate the same
+     * way: data and program accesses differ with function code lookup,
+     * or when a transparent translation register matches one of them.
+     * Writes are granted once the page is modified so that M gets set.
+     */
+    if (fetch) {
+        prot = PAGE_EXEC;
+    } else {
+        prot = write ? PAGE_READ | PAGE_WRITE : PAGE_READ;
+    }
+    if (!split) {
+        if (!m68030_tt_match(env, address, dfc, false)) {
+            prot |= PAGE_READ;
+        }
+        if (!m68030_tt_match(env, address, pfc, false)) {
+            prot |= PAGE_EXEC;
+        }
+    }
+    if ((!fetch || !split) && (sr & M68K_MMUSR030_M) &&
+        !(sr & M68K_MMUSR030_W) &&
+        !m68030_tt_match(env, address, dfc, true)) {
+        prot |= PAGE_WRITE;
+    }
+
+    ps = extract32(env->mmu.tc030, 20, 4);
+    if (ps >= TARGET_PAGE_BITS) {
+        vpage = address & TARGET_PAGE_MASK;
+        ppage = w.physical & TARGET_PAGE_MASK;
+    } else {
+        /*
+         * The TLB does not cache pages smaller than TARGET_PAGE_SIZE, but
+         * it still maps the access within a TARGET_PAGE_SIZE page, so the
+         * low address bits must be the same.
+         */
+        if ((address ^ w.physical) & ~TARGET_PAGE_MASK) {
+            qemu_log_mask(LOG_UNIMP, "68030 MMU: %d byte page at %08"
+                          VADDR_PRIx " -> %08x is not supported\n",
+                          1 << ps, address, w.physical);
+        }
+        vpage = address;
+        ppage = w.physical;
+    }
+    tlb_set_page(cs, vpage, ppage, prot, mmu_idx, 1 << ps);
+    return true;
+}
+
+static bool m68030_translate_for_debug(CPUM68KState *env, uint32_t addr,
+                                       hwaddr *physical)
+{
+    int fc = (env->sr & SR_S) ? 5 : 1;
+    M68030Walk w;
+    uint16_t sr;
+
+    if (m68030_tt_match(env, addr, fc, false)) {
+        *physical = addr;
+        return true;
+    }
+    sr = m68030_walk(env, addr, fc, false, 16, false, &w);
+    if (!m68030_access_ok(sr, &w, fc & 4, false)) {
+        return false;
+    }
+    *physical = w.physical;
+    return true;
+}
+
+static void m68030_dump_map(CPUM68KState *env, int fc)
+{
+    uint32_t page = 1u << extract32(env->mmu.tc030, 20, 4);
+    uint32_t addr = 0, first_logical = 0, first_physical = 0;
+    uint32_t next_physical = 0;
+    int first_attr = -1;
+
+    do {
+        M68030Walk w;
+        uint16_t sr = m68030_walk(env, addr, fc, false, 16, false, &w);
+        int attr = -1;
+
+        if (m68030_access_ok(sr, &w, fc & 4, false)) {
+            attr = (sr & M68K_MMUSR030_W) ? 4 : 0;
+        }
+        if (attr != first_attr ||
+            (attr >= 0 && w.physical != next_physical)) {
+            if (first_attr >= 0) {
+                print_address_zone(first_logical, first_physical,
+                                   addr - first_logical, first_attr);
+            }
+            first_logical = addr;
+            first_physical = w.physical;
+            first_attr = attr;
+        }
+        next_physical = w.physical + page;
+        addr += page;
+    } while (addr != 0);
+    if (first_attr >= 0) {
+        print_address_zone(first_logical, first_physical,
+                           addr - first_logical, first_attr);
+    }
+}
+
+static void m68030_dump_mmu(CPUM68KState *env)
+{
+    uint32_t tc = env->mmu.tc030;
+    int i;
+
+    qemu_printf("TC: %08x CRP: %016" PRIx64 " SRP: %016" PRIx64 "\n",
+                tc, env->mmu.crp030, env->mmu.srp030);
+    qemu_printf("TT0: %08x TT1: %08x MMUSR: %04x\n",
+                env->mmu.tt030[0], env->mmu.tt030[1], env->mmu.mmusr030);
+    for (i = 0; i < 2; i++) {
+        uint32_t tt = env->mmu.tt030[i];
+
+        if (tt & M68K_TT030_E) {
+            qemu_printf("TT%d: %02x000000 mask %02xffffff FC %d mask %d %s\n",
+                        i, tt >> 24, (tt >> 16) & 0xff, (tt >> 4) & 7,
+                        tt & 7, tt & M68K_TT030_RWM ? "RW" :
+                        tt & M68K_TT030_RW ? "R" : "W");
+        }
+    }
+    if (!(tc & M68K_TC030_E)) {
+        qemu_printf("Translation disabled\n");
+        return;
+    }
+    qemu_printf("Page size: %d bytes, IS %d, TI %d/%d/%d/%d%s%s\n",
+                1 << extract32(tc, 20, 4), extract32(tc, 16, 4),
+                extract32(tc, 12, 4), extract32(tc, 8, 4),
+                extract32(tc, 4, 4), extract32(tc, 0, 4),
+                tc & M68K_TC030_SRE ? " SRE" : "",
+                tc & M68K_TC030_FCL ? " FCL" : "");
+    qemu_printf("Supervisor data:\n");
+    m68030_dump_map(env, 5);
+    if (tc & (M68K_TC030_SRE | M68K_TC030_FCL)) {
+        qemu_printf("User data:\n");
+        m68030_dump_map(env, 1);
+    }
+}
+
+/* is the CPU's own MMU translating? */
+static bool m68k_mmu_enabled(CPUM68KState *env)
+{
+    if (m68k_feature(env, M68K_FEATURE_M68030)) {
+        return env->mmu.tc030 & M68K_TC030_E;
+    }
+    return env->mmu.tcr & M68K_TCR_ENABLED;
+}
+
 void m68k_cpu_set_addr_map(M68kCPU *cpu, M68kAddrMapFn fn, void *opaque)
 {
     if (cpu->addr_map == fn && cpu->addr_map_opaque == opaque) {
@@ -960,13 +1415,20 @@ bool m68k_cpu_translate_for_debug(CPUState *cs, vaddr addr,
     int access_type;
     target_ulong page_size;
 
-    if ((env->mmu.tcr & M68K_TCR_ENABLED) == 0) {
+    if (!m68k_mmu_enabled(env)) {
         /* MMU disabled */
         M68kCPU *cpu = M68K_CPU(cs);
 
         phys_addr = cpu->addr_map ?
             cpu->addr_map(cpu->addr_map_opaque, addr & TARGET_PAGE_MASK) +
             (addr & ~TARGET_PAGE_MASK) : addr;
+        goto success;
+    }
+
+    if (m68k_feature(env, M68K_FEATURE_M68030)) {
+        if (!m68030_translate_for_debug(env, addr, &phys_addr)) {
+            return false;
+        }
         goto success;
     }
 
@@ -1020,8 +1482,8 @@ bool m68k_cpu_tlb_fill(CPUState *cs, vaddr address, int size,
     int ret;
     target_ulong page_size;
 
-    if ((env->mmu.tcr & M68K_TCR_ENABLED) == 0) {
-        /* MMU disabled */
+    if (!m68k_mmu_enabled(env)) {
+        /* MMU disabled: the board may translate (Macintosh II AMU) */
         M68kCPU *cpu = M68K_CPU(cs);
         vaddr page = address & TARGET_PAGE_MASK;
 
@@ -1031,6 +1493,11 @@ bool m68k_cpu_tlb_fill(CPUState *cs, vaddr address, int size,
                      PAGE_READ | PAGE_WRITE | PAGE_EXEC,
                      mmu_idx, TARGET_PAGE_SIZE);
         return true;
+    }
+
+    if (m68k_feature(env, M68K_FEATURE_M68030)) {
+        return m68030_tlb_fill(cs, address, size, qemu_access_type, mmu_idx,
+                               probe, retaddr);
     }
 
     if (qemu_access_type == MMU_INST_FETCH) {
@@ -1561,6 +2028,151 @@ void HELPER(pflush)(CPUM68KState *env, uint32_t addr, uint32_t opmode)
         tlb_flush(cs);
         break;
     }
+}
+
+/*
+ * 68030 PMOVE: @ext is the extension word, @addr the effective address.
+ * Invalid encodings are rejected by the translator.
+ */
+void HELPER(pmove030)(CPUM68KState *env, uint32_t ext, uint32_t addr,
+                      uint32_t next_pc)
+{
+    CPUState *cs = env_cpu(env);
+    uintptr_t ra = GETPC();
+    int preg = extract32(ext, 10, 3);
+    bool to_mem = ext & 0x200;
+    uint64_t val64;
+    uint32_t val;
+
+    /*
+     * The FD bit would keep the ATC: QEMU's TLB caches the translation
+     * registers too, so it is always flushed.
+     */
+    switch (ext >> 13) {
+    case 0: /* TT0, TT1 */
+        if (to_mem) {
+            cpu_stl_be_mmuidx_ra(env, addr, env->mmu.tt030[preg & 1],
+                                 MMU_KERNEL_IDX, ra);
+        } else {
+            val = cpu_ldl_be_mmuidx_ra(env, addr, MMU_KERNEL_IDX, ra);
+            env->mmu.tt030[preg & 1] = val;
+            tlb_flush(cs);
+        }
+        return;
+    case 2:
+        if (preg == 0) { /* TC */
+            if (to_mem) {
+                cpu_stl_be_mmuidx_ra(env, addr, env->mmu.tc030,
+                                     MMU_KERNEL_IDX, ra);
+                return;
+            }
+            val = cpu_ldl_be_mmuidx_ra(env, addr, MMU_KERNEL_IDX, ra);
+            tlb_flush(cs);
+            if ((val & M68K_TC030_E) && !m68030_tc_valid(val)) {
+                env->mmu.tc030 = val & ~M68K_TC030_E;
+                break;
+            }
+            env->mmu.tc030 = val;
+            return;
+        }
+        /* SRP (2), CRP (3) */
+        if (to_mem) {
+            val64 = preg == 2 ? env->mmu.srp030 : env->mmu.crp030;
+            cpu_stl_be_mmuidx_ra(env, addr, val64 >> 32, MMU_KERNEL_IDX, ra);
+            cpu_stl_be_mmuidx_ra(env, addr + 4, val64, MMU_KERNEL_IDX, ra);
+            return;
+        }
+        val64 = (uint64_t)cpu_ldl_be_mmuidx_ra(env, addr, MMU_KERNEL_IDX,
+                                               ra) << 32;
+        val64 |= cpu_ldl_be_mmuidx_ra(env, addr + 4, MMU_KERNEL_IDX, ra);
+        if (preg == 2) {
+            env->mmu.srp030 = val64;
+        } else {
+            env->mmu.crp030 = val64;
+        }
+        tlb_flush(cs);
+        if (((val64 >> 32) & 3) == M68030_DT_INVALID) {
+            break;
+        }
+        return;
+    case 3: /* MMUSR */
+        if (to_mem) {
+            cpu_stw_be_mmuidx_ra(env, addr, env->mmu.mmusr030,
+                                 MMU_KERNEL_IDX, ra);
+        } else {
+            env->mmu.mmusr030 = cpu_lduw_be_mmuidx_ra(env, addr,
+                                                      MMU_KERNEL_IDX, ra);
+        }
+        return;
+    default:
+        g_assert_not_reached();
+    }
+
+    /* MMU configuration exception, taken after the instruction */
+    cpu_restore_state(cs, ra);
+    env->pc = next_pc;
+    cs->exception_index = EXCP_MMU_CONF;
+    cpu_loop_exit(cs);
+}
+
+void HELPER(pflush030)(CPUM68KState *env)
+{
+    /* PFLUSHA, PFLUSH FC,#mask[,<ea>]: flush everything */
+    tlb_flush(env_cpu(env));
+}
+
+void HELPER(pload030)(CPUM68KState *env, uint32_t addr, uint32_t fc,
+                      uint32_t is_read)
+{
+    M68030Walk w;
+
+    /* there is no ATC to load: only update the descriptors */
+    if ((env->mmu.tc030 & M68K_TC030_E) &&
+        !m68030_tt_match(env, addr, fc, !is_read)) {
+        m68030_walk(env, addr, fc, !is_read, 16, true, &w);
+    }
+}
+
+/* returns the address of the last descriptor, for PTEST ...,An */
+uint32_t HELPER(ptest030)(CPUM68KState *env, uint32_t addr, uint32_t fc,
+                          uint32_t ext)
+{
+    int level = extract32(ext, 10, 3);
+    bool write = !(ext & 0x200);
+    M68030Walk w;
+    uint16_t sr;
+
+    if (level == 0) {
+        /* search the ATC: report what a table search would load into it */
+        if (m68030_tt_match(env, addr, fc, write)) {
+            env->mmu.mmusr030 = M68K_MMUSR030_T;
+            return 0;
+        }
+        if (!(env->mmu.tc030 & M68K_TC030_E)) {
+            env->mmu.mmusr030 = M68K_MMUSR030_I;
+            return 0;
+        }
+        sr = m68030_walk(env, addr, fc, write, 16, false, &w);
+        if ((sr & (M68K_MMUSR030_B | M68K_MMUSR030_L)) ||
+            (!(fc & 4) && (sr & M68K_MMUSR030_S))) {
+            sr |= M68K_MMUSR030_B;
+        }
+        if (!w.resolved) {
+            sr |= M68K_MMUSR030_I;
+        }
+        env->mmu.mmusr030 = sr & (M68K_MMUSR030_B | M68K_MMUSR030_W |
+                                  M68K_MMUSR030_I | M68K_MMUSR030_M);
+        return 0;
+    }
+
+    /* a table search: transparent translation is not checked */
+    sr = m68030_walk(env, addr, fc, write, level, false, &w);
+    if (fc & 4) {
+        /* S is a supervisor-only violation for user function codes */
+        sr &= ~M68K_MMUSR030_S;
+    }
+    env->mmu.mmusr030 = sr;
+    return w.desc_addr;
 }
 
 void HELPER(reset)(CPUM68KState *env)
