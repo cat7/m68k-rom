@@ -27,7 +27,6 @@
 #include "hw/core/or-irq.h"
 #include "hw/core/qdev-properties.h"
 #include "hw/core/sysbus.h"
-#include "hw/misc/unimp.h"
 #include "hw/char/escc.h"
 #include "hw/misc/mac_via.h"
 #include "hw/misc/mac_iop.h"
@@ -35,6 +34,7 @@
 #include "hw/audio/asc.h"
 #include "hw/nubus/mac-nubus-bridge.h"
 #include "hw/input/adb.h"
+#include "hw/scsi/ncr5380.h"
 #include "target/m68k/cpu.h"
 #include "qom/object.h"
 
@@ -86,6 +86,15 @@ struct MacIIfxMachineState {
     OrIRQState scc_orgate;
     ASCState asc;
     MacNubusBridge nubus_bridge;
+
+    /* SCSI DMA ASIC around a 53C80 */
+    NCR5380State *scsi;
+    MemoryRegion scsi_mem;
+    bool scsi_irq;
+    uint32_t dctrl;
+    uint32_t dcnt;
+    uint32_t daddr;
+    uint32_t dtimer;
 
     uint64_t bank_a_size;
     uint64_t bank_b_size;
@@ -204,18 +213,171 @@ static const MemoryRegionOps open_bus_ops = {
     .endianness = DEVICE_BIG_ENDIAN,
 };
 
-static void iifx_unimp(MacIIfxMachineState *m, const char *name,
-                       hwaddr offset, uint64_t size)
-{
-    DeviceState *dev = qdev_new(TYPE_UNIMPLEMENTED_DEVICE);
+/*
+ * SCSI DMA ASIC (343S0064): the 53C80 registers every $10, then
+ *
+ *   $80   control/status   $C0  DMA count   $100  DMA (physical) address
+ *   $140  watchdog timer   $180 test
+ *
+ * With HSKEN, accesses to the data register move 1, 2 or 4 bytes with
+ * the hardware handshake (blind transfers). With DMAEN, starting a 53C80
+ * DMA transfer moves data between the chip and memory; here that runs to
+ * completion at once, as the 5380 model has the data ready.
+ */
+#define SDMA_DMAEN      BIT(0)
+#define SDMA_INTREN     BIT(1)
+#define SDMA_TIMEEN     BIT(2)
+#define SDMA_HSKEN      BIT(3)
+#define SDMA_SCSIP      BIT(6)
+#define SDMA_TIMEP      BIT(7)
+#define SDMA_DMABERR    BIT(8)
 
-    qdev_prop_set_string(dev, "name", name);
-    qdev_prop_set_uint64(dev, "size", size);
-    sysbus_realize_and_unref(SYS_BUS_DEVICE(dev), &error_fatal);
-    memory_region_add_subregion(&m->io, offset,
-                                sysbus_mmio_get_region(SYS_BUS_DEVICE(dev),
-                                                       0));
+#define NCR_REG_DATA    0           /* ODR / CDR */
+#define NCR_REG_IDR     6
+#define NCR_REG_DMA_TX  5
+#define NCR_REG_DMA_RX  7
+
+static void iifx_scsi_update_irq(MacIIfxMachineState *m)
+{
+    qemu_set_irq(qdev_get_gpio_in(DEVICE(&m->oss), OSS_SRC_SCSI),
+                 (m->scsi_irq && (m->dctrl & SDMA_INTREN)) ||
+                 ((m->dctrl & (SDMA_TIMEP | SDMA_TIMEEN)) ==
+                  (SDMA_TIMEP | SDMA_TIMEEN)));
 }
+
+static void iifx_scsi_irq(void *opaque, int n, int level)
+{
+    MacIIfxMachineState *m = opaque;
+
+    m->scsi_irq = level;
+    iifx_scsi_update_irq(m);
+}
+
+static void iifx_scsi_dma(MacIIfxMachineState *m, bool to_device)
+{
+    uint8_t b;
+
+    while (m->dcnt && ncr5380_drq(m->scsi)) {
+        if (to_device) {
+            if (address_space_read(&address_space_memory, m->daddr,
+                                   MEMTXATTRS_UNSPECIFIED, &b, 1)) {
+                m->dctrl |= SDMA_DMABERR;
+                break;
+            }
+            ncr5380_dma_write(m->scsi, b);
+        } else {
+            b = ncr5380_dma_read(m->scsi);
+            if (address_space_write(&address_space_memory, m->daddr,
+                                    MEMTXATTRS_UNSPECIFIED, &b, 1)) {
+                m->dctrl |= SDMA_DMABERR;
+                break;
+            }
+        }
+        m->daddr++;
+        m->dcnt--;
+    }
+}
+
+static uint64_t iifx_scsi_read(void *opaque, hwaddr addr, unsigned size)
+{
+    MacIIfxMachineState *m = opaque;
+    uint64_t val = 0;
+    uint32_t reg32;
+    unsigned i;
+
+    if (addr < 0x80) {
+        unsigned reg = (addr >> 4) & 7;
+
+        if ((m->dctrl & SDMA_HSKEN) &&
+            (reg == NCR_REG_DATA || reg == NCR_REG_IDR)) {
+            for (i = 0; i < size; i++) {
+                val = (val << 8) | ncr5380_dma_read(m->scsi);
+            }
+            return val;
+        }
+        val = ncr5380_reg_read(m->scsi, reg);
+        for (i = 1; i < size; i++) {
+            val |= val << 8;
+        }
+        return val;
+    }
+    switch (addr & ~3) {
+    case 0x80:
+        reg32 = (m->dctrl & ~SDMA_SCSIP) | (m->scsi_irq ? SDMA_SCSIP : 0);
+        break;
+    case 0xc0:
+        reg32 = m->dcnt;
+        break;
+    case 0x100:
+        reg32 = m->daddr;
+        break;
+    case 0x140:
+        reg32 = m->dtimer;
+        break;
+    default:
+        reg32 = 0;
+        break;
+    }
+    /* the registers are longs: pick the bytes asked for */
+    return extract32(reg32, 8 * (4 - (addr & 3) - size), 8 * size);
+}
+
+static void iifx_scsi_write(void *opaque, hwaddr addr, uint64_t val,
+                            unsigned size)
+{
+    MacIIfxMachineState *m = opaque;
+    uint32_t *reg;
+    int i;
+
+    if (addr < 0x80) {
+        unsigned r = (addr >> 4) & 7;
+
+        if ((m->dctrl & SDMA_HSKEN) && r == NCR_REG_DATA) {
+            for (i = size - 1; i >= 0; i--) {
+                ncr5380_dma_write(m->scsi, val >> (8 * i));
+            }
+            return;
+        }
+        ncr5380_reg_write(m->scsi, r, val >> (8 * (size - 1)));
+        if ((m->dctrl & SDMA_DMAEN) &&
+            (r == NCR_REG_DMA_TX || r == NCR_REG_DMA_RX)) {
+            iifx_scsi_dma(m, r == NCR_REG_DMA_TX);
+        }
+        return;
+    }
+    switch (addr & ~3) {
+    case 0x80:
+        reg = &m->dctrl;
+        break;
+    case 0xc0:
+        reg = &m->dcnt;
+        break;
+    case 0x100:
+        reg = &m->daddr;
+        break;
+    case 0x140:
+        reg = &m->dtimer;
+        break;
+    default:
+        return;
+    }
+    *reg = deposit32(*reg, 8 * (4 - (addr & 3) - size), 8 * size, val);
+    if (reg == &m->dctrl) {
+        /* status bits are read-only; RESET clears the error flags */
+        m->dctrl &= ~(SDMA_SCSIP | SDMA_TIMEP | SDMA_DMABERR | BIT(4));
+        iifx_scsi_update_irq(m);
+    }
+}
+
+static const MemoryRegionOps iifx_scsi_ops = {
+    .read = iifx_scsi_read,
+    .write = iifx_scsi_write,
+    .endianness = DEVICE_BIG_ENDIAN,
+    .valid = {
+        .min_access_size = 1,
+        .max_access_size = 4,
+    },
+};
 
 static void iifx_machine_reset(MachineState *machine, ResetType type)
 {
@@ -394,8 +556,17 @@ static void iifx_machine_init(MachineState *machine)
                                 sysbus_mmio_get_region(sysbus, 0));
     sysbus_connect_irq(sysbus, 0, qdev_get_gpio_in(oss, OSS_SRC_ASC));
 
-    /* not emulated yet */
-    iifx_unimp(m, "maciifx.scsi-dma", SCSI_OFFSET, 0x2000);
+    /* SCSI: a 53C80 inside the SCSI DMA ASIC, interrupting on the OSS */
+    dev = qdev_new(TYPE_NCR5380);
+    m->scsi = NCR5380(dev);
+    qdev_prop_set_uint8(dev, "it_shift", 4);
+    sysbus_realize_and_unref(SYS_BUS_DEVICE(dev), &error_fatal);
+    qdev_connect_gpio_out(dev, NCR5380_GPIO_IRQ,
+                          qemu_allocate_irq(iifx_scsi_irq, m, 0));
+    memory_region_init_io(&m->scsi_mem, OBJECT(m), &iifx_scsi_ops, m,
+                          "maciifx.scsi-dma", 0x2000);
+    memory_region_add_subregion(&m->io, SCSI_OFFSET, &m->scsi_mem);
+    scsi_bus_legacy_handle_cmdline(&m->scsi->bus);
 
     /* NuBus slots $9-$E */
     object_initialize_child(OBJECT(machine), "mac-nubus-bridge",

@@ -91,6 +91,7 @@ config MACIIFX
     bool
     default y
     depends on M68K
+    select NCR5380
     select MAC_VIA
     select MAC_OSS
     select MAC_IOP
@@ -98,4 +99,3 @@ config MACIIFX
     select ESCC
     select OR_IRQ
     select ASC
-    select UNIMP
