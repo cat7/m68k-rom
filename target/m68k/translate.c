@@ -5945,6 +5945,7 @@ void register_m68k_insns (CPUM68KState *env)
     BASE(undef,     0000, 0000);
     INSN(arith_im,  0080, fff8, CF_ISA_A);
     INSN(arith_im,  0000, ff00, M68K);
+    INSN(undef,     00c0, ffc0, M68K);
     INSN(bitrev,    00c0, fff8, CF_ISA_APLUSC);
     INSN(chk2,      00d0, fff8, CHK2);
     INSN(chk2,      00e8, fff8, CHK2);
