@@ -2045,9 +2045,12 @@ void HELPER(pmove030)(CPUM68KState *env, uint32_t ext, uint32_t addr,
     uint32_t val;
 
     /*
-     * The FD bit would keep the ATC: QEMU's TLB caches the translation
-     * registers too, so it is always flushed.
+     * FD (flush disable) keeps the ATC, which QEMU's TLB stands in for.
+     * The Mac ROM's SwapMMUMode relies on it: it loads the new CRP with
+     * FD set, and the instructions up to the TC load still run through
+     * the old translations.
      */
+    bool fd = ext & 0x100;
     switch (ext >> 13) {
     case 0: /* TT0, TT1 */
         if (to_mem) {
@@ -2056,7 +2059,9 @@ void HELPER(pmove030)(CPUM68KState *env, uint32_t ext, uint32_t addr,
         } else {
             val = cpu_ldl_be_mmuidx_ra(env, addr, MMU_KERNEL_IDX, ra);
             env->mmu.tt030[preg & 1] = val;
-            tlb_flush(cs);
+            if (!fd) {
+                tlb_flush(cs);
+            }
         }
         return;
     case 2:
@@ -2067,12 +2072,17 @@ void HELPER(pmove030)(CPUM68KState *env, uint32_t ext, uint32_t addr,
                 return;
             }
             val = cpu_ldl_be_mmuidx_ra(env, addr, MMU_KERNEL_IDX, ra);
-            tlb_flush(cs);
+            if (!fd) {
+                tlb_flush(cs);
+            }
             if ((val & M68K_TC030_E) && !m68030_tc_valid(val)) {
                 env->mmu.tc030 = val & ~M68K_TC030_E;
                 break;
             }
             env->mmu.tc030 = val;
+            qemu_log_mask(CPU_LOG_MMU, "68030 TC=%08x CRP=%016" PRIx64
+                          " TT0=%08x TT1=%08x\n", val, env->mmu.crp030,
+                          env->mmu.tt030[0], env->mmu.tt030[1]);
             return;
         }
         /* SRP (2), CRP (3) */
@@ -2090,7 +2100,11 @@ void HELPER(pmove030)(CPUM68KState *env, uint32_t ext, uint32_t addr,
         } else {
             env->mmu.crp030 = val64;
         }
-        tlb_flush(cs);
+        qemu_log_mask(CPU_LOG_MMU, "68030 %s=%016" PRIx64 " pc=%08x\n",
+                      preg == 2 ? "SRP" : "CRP", val64, env->pc);
+        if (!fd) {
+            tlb_flush(cs);
+        }
         if (((val64 >> 32) & 3) == M68030_DT_INVALID) {
             break;
         }
