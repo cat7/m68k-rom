@@ -807,7 +807,8 @@ static void mac_iop_realize(DeviceState *dev, Error **errp)
         if (!blk) {
             continue;
         }
-        if (mac_iop_fd_set_perm(blk, errp) < 0) {
+        /* an empty drive asks for nothing, so a read-only disk can go in */
+        if (blk_is_inserted(blk) && mac_iop_fd_set_perm(blk, errp) < 0) {
             return;
         }
         s->fd_ref[i].iop = s;

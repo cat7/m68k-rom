@@ -783,6 +783,13 @@ static void swim2_drive_realize(DeviceState *const dev, Error **const errp)
         /* errp set by blkconf_apply_backend_options(). */
         return;
     }
+    if (!blk_is_inserted(drive->conf.blk)) {
+        /*
+         * An empty drive asks for nothing, so that a read-only disk can
+         * go in later; the change callback asks again for the disk.
+         */
+        blk_set_perm(drive->conf.blk, 0, BLK_PERM_ALL, &error_abort);
+    }
 
     if (blk_get_on_error(drive->conf.blk, 0) != BLOCKDEV_ON_ERROR_ENOSPC &&
         blk_get_on_error(drive->conf.blk, 0) != BLOCKDEV_ON_ERROR_REPORT) {
