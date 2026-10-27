@@ -51,6 +51,8 @@ struct SWIM2State {
     uint8_t error_reg;
     bool did_handshake;
     bool wait_for_mark;
+    uint16_t write_crc;         /* CRC of what was written since the mark */
+    bool wrote_mark;
 
     Fifo32 fifo;
 

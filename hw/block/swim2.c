@@ -105,6 +105,9 @@ static uint32_t swim2_fifo_pack(const uint8_t data, const bool is_mark)
     return data | (is_mark ? BIT(8) : 0);
 }
 
+/* a "write CRC" entry: the CRC of the bytes written since the sync mark */
+#define SWIM2_FIFO_CRC  BIT(9)
+
 static uint8_t swim2_fifo_data(const uint32_t entry)
 {
     return entry & 0xff;
@@ -265,6 +268,27 @@ static void swim2_fill_fifo_from_drive(SWIM2State *const ctrl)
     }
 }
 
+/* CRC-CCITT, as the ISM computes it for MFM ID and data fields */
+static void swim2_crc_byte(SWIM2State *const ctrl, const uint8_t value,
+                           const bool is_mark)
+{
+    uint16_t crc = ctrl->write_crc;
+
+    if (is_mark && !ctrl->wrote_mark) {
+        crc = 0xffff;                   /* a new field starts */
+    }
+    ctrl->wrote_mark = is_mark;
+    crc ^= value << 8;
+    for (int i = 0; i < 8; i++) {
+        crc = crc & 0x8000 ? (crc << 1) ^ 0x1021 : crc << 1;
+    }
+    ctrl->write_crc = crc;
+}
+
+/*
+ * Everything written goes to the drive: gaps, sync marks (flagged), data,
+ * and for "write CRC" the two CRC bytes of the field.
+ */
 static void swim2_push_fifo_to_drive(SWIM2State *const ctrl)
 {
     SonyDrive *const drive = swim2_active_drive(ctrl);
@@ -275,17 +299,26 @@ static void swim2_push_fifo_to_drive(SWIM2State *const ctrl)
          * to a drive.  Just consume the FIFO without error.
          */
         swim2_fifo_clear(ctrl);
-    } else {
-        uint8_t data;
-        bool is_mark;
+        return;
+    }
+    while (!fifo32_is_empty(&ctrl->fifo)) {
+        const uint32_t entry = fifo32_pop(&ctrl->fifo);
 
-        while (swim2_fifo_pop(ctrl, &data, &is_mark)) {
-            if (ctrl->wait_for_mark && is_mark) {
-                ctrl->wait_for_mark = false;
-            } else if (!ctrl->wait_for_mark && !is_mark) {
-            sony_drive_write_byte(drive, data);
-            }
+        if (entry & SWIM2_FIFO_CRC) {
+            const uint16_t crc = ctrl->write_crc;
+
+            sony_drive_write_byte(drive, crc >> 8, false);
+            sony_drive_write_byte(drive, crc & 0xff, false);
+            ctrl->wrote_mark = false;
+        } else {
+            const uint8_t data = swim2_fifo_data(entry);
+            const bool is_mark = swim2_fifo_is_mark(entry);
+
+            swim2_crc_byte(ctrl, data, is_mark);
+            sony_drive_write_byte(drive, data, is_mark);
         }
+        trace_swim2_fifo_pop(fifo32_num_used(&ctrl->fifo),
+                             swim2_fifo_data(entry), entry >> 8, true);
     }
 }
 
@@ -497,7 +530,7 @@ static uint8_t swim1_iwm_access(SWIM2State *const ctrl, const hwaddr addr,
         }
         if (nq6 && nq7 && nmotor && drive) {
             /* GCR data byte to the drive (the Mac II's 800K disks) */
-            sony_drive_write_byte(drive, data);
+            sony_drive_write_byte(drive, data, false);
         }
         return 0;
     }
@@ -643,7 +676,14 @@ static void swim2_write(void *const opaque, const hwaddr addr,
         }
         break;
     case SWIM2_REG_WRITE_CRC:
-        /* Nothing to do. */
+        if (fifo32_is_full(&ctrl->fifo)) {
+            swim2_set_error(ctrl, SWIM2_ERROR_OVERRUN);
+        } else {
+            fifo32_push(&ctrl->fifo, SWIM2_FIFO_CRC);
+            if (ctrl->mode_reg & SWIM2_MODE_ACTION) {
+                swim2_push_fifo_to_drive(ctrl);
+            }
+        }
         break;
     case SWIM2_REG_PARAMETER:
         swim2_handle_parameter_write(ctrl, value);

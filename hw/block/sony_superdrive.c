@@ -81,7 +81,6 @@ static const char *const sony_drive_cmd_names[] = {
 #define SONY_GCR_SECTOR_LENGTH  (SONY_GCR_TAG_LENGTH + SONY_GCR_DATA_LENGTH)
 #define SONY_GCR_ENCODED_LENGTH 699 /* i.e., sony_6and2_packed_len(524) */
 #define SONY_GCR_SYNC_LEN         6
-#define SONY_MFM_SECTOR_LENGTH  512
 
 static uint8_t sony_drive_sectors_for_track(const SonyDrive *const drive,
                                             const uint8_t track)
@@ -407,23 +406,6 @@ static bool sony_checksum_decode(const uint8_t *in, const size_t in_size,
     }
 }
 
-static bool sony_validate_address(SonyDrive *const drive, const uint8_t track,
-                                  const uint8_t head, const uint8_t sector)
-{
-    const uint8_t sectors = sony_drive_sectors_for_track(drive, track);
-    assert(sectors > 0);
-
-    if (track >= drive->cylinders) {
-        return false;
-    } else if (head > 0 && !drive->double_sided) {
-        return false;
-    } else if (sector >= sectors) {
-        return false;
-    } else {
-        return true;
-    }
-}
-
 static uint64_t sony_lba(SonyDrive *const drive, const uint8_t track,
                          const uint8_t head, const uint8_t sector)
 {
@@ -452,25 +434,33 @@ static uint64_t sony_lba(SonyDrive *const drive, const uint8_t track,
 }
 
 /*
- * 400K/800K GCR disks are emulated a track at a time, the way the head sees
- * them: each side of the current track is a ring of disk bytes, and reads
- * and writes move one head position around it. That covers the Mac's two
- * ways of writing: one sector's data field after its address field, and a
- * whole track at once when it formats a disk. When the head leaves the
- * track (step, motor off, eject), every sector with a good address field,
- * data field and checksum goes back into the image.
+ * Disks are emulated a track at a time, the way the head sees them: each
+ * side of the current track is a ring of disk bytes (with the MFM sync
+ * marks flagged), and reads and writes move one head position around it.
+ * That covers the Mac's two ways of writing: one sector's data field after
+ * its address field, and a whole track at once when it formats a disk.
+ * When the head leaves the track (step, motor off, eject), every sector
+ * with a good address field, data field and checksum or CRC goes back
+ * into the image.
  *
- * The ring is as long as a real track at that zone's speed (2 us bit cells,
- * 394 to 590 rpm); self-sync bytes count as one byte here.
+ * A ring is as long as a real track: GCR at 2 us bit cells and 394 to 590
+ * rpm by zone (self-sync bytes count as one byte here), MFM high density
+ * at 500 kbit/s and 300 rpm. MFM tracks have an index pulse where the ring
+ * starts, which the Mac waits for when it formats one.
  */
 static const uint16_t sony_gcr_track_len[] = { 9520, 8740, 7944, 7142, 6356 };
+#define SONY_MFM_TRACK_LEN      12500
+#define SONY_MFM_INDEX_LEN      100     /* about 1.6 ms */
+#define SONY_MFM_GAP3           84
 
-static uint16_t sony_gcr_track_capacity(const uint8_t track)
+static uint16_t sony_track_capacity(const SonyDrive *const drive,
+                                    const uint8_t track)
 {
     const unsigned zone = MIN(track / 16, ARRAY_SIZE(sony_gcr_track_len) - 1);
 
-    QEMU_BUILD_BUG_ON(SONY_GCR_TRACK_MAX < 9520);
-    return sony_gcr_track_len[zone];
+    QEMU_BUILD_BUG_ON(SONY_TRACK_MAX < 9520 ||
+                      SONY_TRACK_MAX < SONY_MFM_TRACK_LEN);
+    return drive->gcr_encode ? sony_gcr_track_len[zone] : SONY_MFM_TRACK_LEN;
 }
 
 static uint8_t sony_gcr_format_byte(const SonyDrive *const drive)
@@ -542,8 +532,7 @@ static int sony_gcr_build_sector(SonyDrive *const drive, const uint8_t track,
 }
 
 /* Has this side of the disk any sectors? (not side 2 of a 400K disk) */
-static bool sony_gcr_side_exists(const SonyDrive *const drive,
-                                 const uint8_t head)
+static bool sony_side_exists(const SonyDrive *const drive, const uint8_t head)
 {
     return head == 0 || drive->double_sided;
 }
@@ -583,18 +572,18 @@ static bool sony_gcr_grow_to_two_sides(SonyDrive *const drive)
     return true;
 }
 
-/* Put the good sectors of one side of the ring back into the image */
+/* Put the good GCR sectors of one side of the ring back into the image */
 static void sony_gcr_flush_side(SonyDrive *const drive, const uint8_t head)
 {
-    const uint8_t track = drive->gcr_cyl;
+    const uint8_t track = drive->track_cyl;
     const uint8_t sectors = sony_drive_sectors_for_track(drive, track);
-    const unsigned len = drive->gcr_len;
+    const unsigned len = drive->track_len;
     g_autofree uint8_t *r = g_malloc(len * 2);
     unsigned written = 0, bad = 0;
 
     /* twice over, so fields that wrap around the ring read straight */
-    memcpy(r, drive->gcr_track[head], len);
-    memcpy(r + len, drive->gcr_track[head], len);
+    memcpy(r, drive->track_buf[head], len);
+    memcpy(r + len, drive->track_buf[head], len);
 
     for (unsigned i = 0; i < len; i++) {
         uint8_t hdr[5], sector_data[SONY_GCR_SECTOR_LENGTH];
@@ -643,187 +632,208 @@ static void sony_gcr_flush_side(SonyDrive *const drive, const uint8_t head)
             written++;
         }
     }
-    trace_sony_drive_gcr_flush(drive, track, head, written, bad);
+    trace_sony_drive_track_flush(drive, track, head, written, bad);
+}
+
+static uint16_t sony_crc16(uint16_t crc, const uint8_t *p, size_t len)
+{
+    while (len--) {
+        crc ^= *p++ << 8;
+        for (int i = 0; i < 8; i++) {
+            crc = crc & 0x8000 ? (crc << 1) ^ 0x1021 : crc << 1;
+        }
+    }
+    return crc;
+}
+
+/* Put bytes on an MFM ring; @marks: the first @marks bytes are sync marks */
+static unsigned sony_mfm_put(SonyDrive *const drive, const uint8_t head,
+                             unsigned idx, const uint8_t *p, size_t len,
+                             unsigned marks)
+{
+    for (size_t i = 0; i < len; i++, idx++) {
+        drive->track_buf[head][idx] = p[i];
+        bitset_set(drive->track_mark[head], idx, i < marks);
+    }
+    return idx;
+}
+
+static unsigned sony_mfm_fill(SonyDrive *const drive, const uint8_t head,
+                              unsigned idx, const uint8_t value, size_t len)
+{
+    memset(drive->track_buf[head] + idx, value, len);
+    bitset_set_range(drive->track_mark[head], idx, len, false);
+    return idx + len;
+}
+
+/* One side of an MFM track, IBM System 34 layout, sectors 1-18 in order */
+static bool sony_mfm_build_side(SonyDrive *const drive, const uint8_t track,
+                                const uint8_t head)
+{
+    static const uint8_t iam[] = { 0xc2, 0xc2, 0xc2, 0xfc };
+    unsigned idx = 0;
+
+    idx = sony_mfm_fill(drive, head, idx, 0x4e, 80);
+    idx = sony_mfm_fill(drive, head, idx, 0x00, 12);
+    idx = sony_mfm_put(drive, head, idx, iam, sizeof iam, 3);
+    idx = sony_mfm_fill(drive, head, idx, 0x4e, 50);
+
+    for (uint8_t s = 0; s < drive->sectors_per_track; s++) {
+        uint8_t id[10] = { 0xa1, 0xa1, 0xa1, 0xfe, track, head, s + 1, 2 };
+        uint8_t data[4 + 512 + 2] = { 0xa1, 0xa1, 0xa1, 0xfb };
+        const uint64_t lba = sony_lba(drive, track, head, s);
+        uint16_t crc;
+
+        crc = sony_crc16(0xffff, id, 8);
+        id[8] = crc >> 8;
+        id[9] = crc;
+        if (blk_pread(drive->blk, lba * 512, 512, data + 4, 0) < 0) {
+            return false;
+        }
+        crc = sony_crc16(0xffff, data, 4 + 512);
+        data[516] = crc >> 8;
+        data[517] = crc;
+
+        idx = sony_mfm_fill(drive, head, idx, 0x00, 12);
+        idx = sony_mfm_put(drive, head, idx, id, sizeof id, 3);
+        idx = sony_mfm_fill(drive, head, idx, 0x4e, 22);
+        idx = sony_mfm_fill(drive, head, idx, 0x00, 12);
+        idx = sony_mfm_put(drive, head, idx, data, sizeof data, 3);
+        idx = sony_mfm_fill(drive, head, idx, 0x4e, SONY_MFM_GAP3);
+    }
+    assert(idx <= drive->track_len);
+    sony_mfm_fill(drive, head, idx, 0x4e, drive->track_len - idx);
+    return true;
+}
+
+/* Is there a sync mark (three A1s) and then @am at ring offset @i? */
+static bool sony_mfm_am_at(const uint8_t *r, const uint8_t *m, unsigned len,
+                           unsigned i, uint8_t am)
+{
+    for (unsigned k = 0; k < 3; k++) {
+        if (r[i + k] != 0xa1 || !bitset_get(m, (i + k) % len)) {
+            return false;
+        }
+    }
+    return r[i + 3] == am;
+}
+
+/* Put the good MFM sectors of one side of the ring back into the image */
+static void sony_mfm_flush_side(SonyDrive *const drive, const uint8_t head)
+{
+    const uint8_t track = drive->track_cyl;
+    const unsigned len = drive->track_len;
+    const uint8_t *const m = drive->track_mark[head];
+    g_autofree uint8_t *r = g_malloc(len * 2);
+    unsigned written = 0, bad = 0;
+
+    memcpy(r, drive->track_buf[head], len);
+    memcpy(r + len, drive->track_buf[head], len);
+
+    for (unsigned i = 0; i < len; i++) {
+        unsigned j, end;
+
+        if (!sony_mfm_am_at(r, m, len, i, 0xfe) ||
+            sony_crc16(0xffff, r + i, 10) != 0) {
+            continue;
+        }
+        const uint8_t c = r[i + 4], h = r[i + 5], sec = r[i + 6], n = r[i + 7];
+
+        if (c != track || h != head || n != 2 || sec < 1 ||
+            sec > drive->sectors_per_track) {
+            continue;
+        }
+
+        /* the data field follows the gap after the ID field */
+        end = MIN(i + 10 + 60, 2 * len - (4 + 512 + 2));
+        for (j = i + 10; j < end; j++) {
+            if (sony_mfm_am_at(r, m, len, j, 0xfb)) {
+                break;
+            }
+        }
+        if (j >= end || sony_crc16(0xffff, r + j, 4 + 512 + 2) != 0) {
+            bad++;
+            continue;
+        }
+
+        const uint64_t lba = sony_lba(drive, track, head, sec - 1);
+        if (lba < drive->total_sectors &&
+            blk_pwrite(drive->blk, lba * 512, 512, r + j + 4, 0) >= 0) {
+            written++;
+        }
+    }
+    trace_sony_drive_track_flush(drive, track, head, written, bad);
 }
 
 /* Write back the current track if the Mac changed it, and let it go */
-static void sony_gcr_release(SonyDrive *const drive)
+static void sony_track_release(SonyDrive *const drive)
 {
-    if (drive->gcr_loaded) {
+    if (drive->track_loaded) {
         for (uint8_t head = 0; head < 2; head++) {
-            if (drive->gcr_dirty[head] && drive->disk_in) {
-                sony_gcr_flush_side(drive, head);
+            if (drive->track_dirty[head] && drive->disk_in) {
+                if (drive->gcr_encode) {
+                    sony_gcr_flush_side(drive, head);
+                } else {
+                    sony_mfm_flush_side(drive, head);
+                }
             }
-            drive->gcr_dirty[head] = false;
+            drive->track_dirty[head] = false;
         }
     }
-    drive->gcr_loaded = false;
+    drive->track_loaded = false;
 }
 
 /* The ring for the track under the head, built from the image if need be */
-static bool sony_gcr_track(SonyDrive *const drive)
+static bool sony_track_load(SonyDrive *const drive)
 {
     const uint8_t track = drive->current_track;
 
     if (!drive->disk_in) {
         return false;
     }
-    if (drive->gcr_loaded && drive->gcr_cyl == track) {
+    if (drive->track_loaded && drive->track_cyl == track) {
         return true;
     }
-    sony_gcr_release(drive);
+    sony_track_release(drive);
 
-    const uint8_t sectors = sony_drive_sectors_for_track(drive, track);
-    const uint16_t len = sony_gcr_track_capacity(track);
+    const uint16_t len = sony_track_capacity(drive, track);
 
-    drive->gcr_cyl = track;
-    drive->gcr_len = len;
-    drive->gcr_pos = 0;
+    drive->track_cyl = track;
+    drive->track_len = len;
+    drive->track_pos = 0;
     for (uint8_t head = 0; head < 2; head++) {
-        uint8_t *const ring = drive->gcr_track[head];
-        unsigned idx = 0;
+        uint8_t *const ring = drive->track_buf[head];
 
-        memset(ring, 0xff, len);
-        for (uint8_t s = 0; sony_gcr_side_exists(drive, head) && s < sectors;
-             s++) {
-            const int n = sony_gcr_build_sector(drive, track, head, s,
-                                                ring + idx);
-            if (n < 0) {
-                return false;
-            }
-            idx += n + 4;       /* a little gap before the next sector */
+        memset(ring, drive->gcr_encode ? 0xff : 0x4e, len);
+        memset(drive->track_mark[head], 0, sizeof drive->track_mark[head]);
+        if (!sony_side_exists(drive, head)) {
+            continue;
         }
-        assert(idx <= len);
+        if (drive->gcr_encode) {
+            const uint8_t sectors = sony_drive_sectors_for_track(drive, track);
+            unsigned idx = 0;
+
+            for (uint8_t s = 0; s < sectors; s++) {
+                const int n = sony_gcr_build_sector(drive, track, head, s,
+                                                    ring + idx);
+                if (n < 0) {
+                    return false;
+                }
+                idx += n + 4;       /* a little gap before the next sector */
+            }
+            assert(idx <= len);
+        } else if (!sony_mfm_build_side(drive, track, head)) {
+            return false;
+        }
     }
-    drive->gcr_loaded = true;
-    trace_sony_drive_gcr_load(drive, track, len);
+    drive->track_loaded = true;
+    trace_sony_drive_track_load(drive, track, len);
     return true;
-}
-
-static bool sony_drive_prepare_mfm(SonyDrive *const drive, const uint64_t lba,
-                                   const uint8_t track, const uint8_t head,
-                                   const uint8_t sector)
-{
-    size_t idx = 0;
-
-    /* Sync field. */
-    memset(drive->xfer_buffer + idx, 0x00, 12);
-    idx += 12;
-
-    /* Address field. */
-    bitset_set_range(drive->xfer_mark_bitset, idx, 3, true);
-    drive->xfer_buffer[idx++] = 0xA1;
-    drive->xfer_buffer[idx++] = 0xA1;
-    drive->xfer_buffer[idx++] = 0xA1;
-
-    drive->xfer_buffer[idx++] = 0xFE;
-    drive->xfer_buffer[idx++] = track;
-    drive->xfer_buffer[idx++] = head;
-    drive->xfer_buffer[idx++] = sector + 1; /* NOTE: 1-indexed, unlike GCR! */
-    drive->xfer_buffer[idx++] = 0x02; /* 512 bytes/sector */
-    drive->xfer_buffer[idx++] = 0x00; /* CRC (unimplemented) */
-    drive->xfer_buffer[idx++] = 0x00; /* CRC (unimplemented) */
-
-    /* Intra-sector gap. */
-    memset(drive->xfer_buffer + idx, 0x4E, 22);
-    idx += 22;
-
-    /* Sync field. */
-    memset(drive->xfer_buffer + idx, 0x00, 12);
-    idx += 12;
-
-    /* Data mark. */
-    bitset_set_range(drive->xfer_mark_bitset, idx, 3, true);
-    drive->xfer_buffer[idx++] = 0xA1;
-    drive->xfer_buffer[idx++] = 0xA1;
-    drive->xfer_buffer[idx++] = 0xA1;
-
-    drive->xfer_write_position = idx;
-    drive->xfer_buffer[idx++] = 0xFB;
-
-    /* Data. */
-    const int ret = blk_pread(drive->blk, lba * 512, SONY_MFM_SECTOR_LENGTH,
-                              drive->xfer_buffer + idx, 0);
-    if (ret < 0) {
-        return false;
-    }
-    idx += SONY_MFM_SECTOR_LENGTH;
-
-    drive->xfer_buffer[idx++] = 0; /* CRC (unimplemented) */
-    drive->xfer_buffer[idx++] = 0; /* CRC (unimplemented) */
-
-    /* Inter-sector gap. */
-    memset(drive->xfer_buffer + idx, 0x4E, 101);
-    idx += 101;
-
-    drive->xfer_length = idx;
-    drive->xfer_position = 0;
-    drive->xfer_active = true;
-
-    return true;
-}
-
-static bool sony_drive_persist_mfm(SonyDrive *const drive)
-{
-    const size_t offset = 12 + 10 + 22 + 12 + 4;
-    const int ret = blk_pwrite(drive->blk, drive->xfer_lba * 512,
-                               SONY_MFM_SECTOR_LENGTH,
-                               drive->xfer_buffer + offset, 0);
-    return ret >= 0;
 }
 
 static void sony_drive_transfer_reset(SonyDrive *const drive)
 {
-    /* First, persist any dirty xfer. */
-    sony_gcr_release(drive);
-    if (drive->xfer_dirty) {
-        const bool result = sony_drive_persist_mfm(drive);
-
-        assert(result);
-        trace_sony_drive_persist(drive, drive->xfer_lba);
-    }
-
-    drive->xfer_active = false;
-    drive->xfer_dirty = false;
-    drive->xfer_lba = UINT64_MAX;
-    drive->xfer_position = 0;
-    drive->xfer_write_position = 0;
-    drive->xfer_length = 0;
-    memset(drive->xfer_buffer, 0, sizeof drive->xfer_buffer);
-    memset(drive->xfer_mark_bitset, 0, sizeof drive->xfer_mark_bitset);
-}
-
-static bool sony_drive_prepare(SonyDrive *const drive)
-{
-    if (!drive->disk_in) {
-        trace_sony_drive_prepare(drive, 0, 0, 0, 0, 0);
-        return false;
-    }
-
-    sony_drive_transfer_reset(drive);
-
-    const uint8_t sectors = sony_drive_sectors_for_track(drive,
-                                                         drive->current_track);
-    const uint8_t head = drive->sel ? 1 : 0;
-    const uint8_t track = drive->current_track;
-
-    assert(head == 0 || drive->double_sided);
-    assert(sectors != 0);
-
-    const uint8_t sector = drive->current_sector;
-    drive->current_sector = (drive->current_sector + 1) % sectors;
-    assert(sony_validate_address(drive, track, head, sector));
-
-    const uint64_t lba = sony_lba(drive, track, head, sector);
-    assert(lba < drive->total_sectors);
-
-    const bool result = sony_drive_prepare_mfm(drive, lba, track, head,
-                                               sector);
-
-    drive->xfer_lba = lba;
-    trace_sony_drive_prepare(drive, track, head, sector, drive->gcr_encode,
-                             drive->xfer_length);
-    return result;
+    sony_track_release(drive);
 }
 
 static uint8_t sony_drive_selected_drive_reg(const SonyDrive *const drive)
@@ -858,7 +868,6 @@ static void sony_drive_step(SonyDrive *const drive)
         }
     }
 
-    drive->current_sector = 0;
     sony_drive_transfer_reset(drive);
     trace_sony_drive_step(drive, drive->seek_direction, drive->current_track);
 }
@@ -939,8 +948,19 @@ bool sony_drive_read_sense(SonyDrive *const drive)
         break;
     case SONY_REG_RDDATA0:
     case SONY_REG_RDDATA1:
-        /* Single-bit reads are not emulated. */
+        /*
+         * Single-bit reads are not emulated, but on MFM disks this is the
+         * index pulse (low), at the start of the ring. The disk turns
+         * while the Mac polls it, a byte a poll, unless it moves bytes.
+         */
         value = true;
+        if (!drive->gcr_encode && drive->motor_on && sony_track_load(drive)) {
+            if (!drive->track_moved) {
+                drive->track_pos = (drive->track_pos + 1) % drive->track_len;
+            }
+            drive->track_moved = false;
+            value = drive->track_pos >= SONY_MFM_INDEX_LEN;
+        }
         break;
     case SONY_REG_SUPERDRIVE:
         value = true;
@@ -990,82 +1010,49 @@ void sony_drive_set_inputs(SonyDrive *const drive, const uint8_t phases,
 bool sony_drive_read_byte(SonyDrive *const drive,
                           uint8_t *const value_out, bool *const is_mark_out)
 {
-    if (drive->gcr_encode) {
-        const uint8_t head = drive->sel ? 1 : 0;
+    const uint8_t head = drive->sel ? 1 : 0;
+    const unsigned pos = drive->track_pos;
 
-        if (!sony_gcr_track(drive)) {
-            return false;
-        }
-        uint8_t value = drive->gcr_track[head][drive->gcr_pos];
-        drive->gcr_pos = (drive->gcr_pos + 1) % drive->gcr_len;
-        if (!(value & 0x80)) {
-            /* a self-sync pattern the CPU wrote (FF 3F CF ...) reads as FF */
-            value = 0xff;
-        }
-        *value_out = value;
-        *is_mark_out = false;
-        return true;
-    }
-
-    if (!drive->xfer_active || drive->xfer_position >= drive->xfer_length) {
-        sony_drive_prepare(drive);
-    }
-
-    if (!drive->xfer_active) {
+    if (!sony_track_load(drive)) {
         return false;
-    } else {
-        const uint16_t offset = drive->xfer_position;
-        drive->xfer_position++;
-        uint8_t value = drive->xfer_buffer[offset];
-        const bool is_mark = bitset_get(drive->xfer_mark_bitset, offset);
-
-        *value_out = value;
-        *is_mark_out = is_mark;
-
-        trace_sony_drive_read_byte(drive, value, is_mark,
-                                   drive->xfer_lba, offset);
-        return true;
     }
+    uint8_t value = drive->track_buf[head][pos];
+    const bool is_mark = bitset_get(drive->track_mark[head], pos);
+
+    drive->track_pos = (pos + 1) % drive->track_len;
+    drive->track_moved = true;
+    if (drive->gcr_encode && !(value & 0x80)) {
+        /* a self-sync pattern the CPU wrote (FF 3F CF ...) reads as FF */
+        value = 0xff;
+    }
+    *value_out = value;
+    *is_mark_out = is_mark;
+    trace_sony_drive_read_byte(drive, value, is_mark, drive->track_cyl, pos);
+    return true;
 }
 
-bool sony_drive_write_byte(SonyDrive *const drive, const uint8_t value)
+bool sony_drive_write_byte(SonyDrive *const drive, const uint8_t value,
+                           const bool is_mark)
 {
-    if (drive->write_protected) {
+    const uint8_t head = drive->sel ? 1 : 0;
+
+    if (drive->write_protected || !sony_track_load(drive)) {
+        return false;
+    }
+    if (!sony_side_exists(drive, head) &&
+        !(drive->gcr_encode && sony_gcr_grow_to_two_sides(drive))) {
         return false;
     }
 
-    if (drive->gcr_encode) {
-        const uint8_t head = drive->sel ? 1 : 0;
+    const unsigned pos = drive->track_pos;
 
-        if (!sony_gcr_track(drive) ||
-            (!sony_gcr_side_exists(drive, head) &&
-             !sony_gcr_grow_to_two_sides(drive))) {
-            return false;
-        }
-        drive->gcr_track[head][drive->gcr_pos] = value;
-        drive->gcr_pos = (drive->gcr_pos + 1) % drive->gcr_len;
-        drive->gcr_dirty[head] = true;
-        return true;
-    }
-
-    /*
-     * NOTE: for now, we should't get a write unless we have an active sector.
-     * We'll have to revisit this to implement duplicating/formatting.
-     */
-    if (!drive->xfer_active ||
-        drive->xfer_write_position >= drive->xfer_length) {
-        /* e.g. formatting a 1.44 MB disk: not emulated, dropped */
-        return false;
-    } else {
-        const uint16_t offset = drive->xfer_write_position;
-
-        drive->xfer_buffer[offset] = value;
-        drive->xfer_write_position++;
-        drive->xfer_dirty = true;
-
-        trace_sony_drive_write_byte(drive, value, drive->xfer_lba, offset);
-        return true;
-    }
+    drive->track_buf[head][pos] = value;
+    bitset_set(drive->track_mark[head], pos, is_mark);
+    drive->track_pos = (pos + 1) % drive->track_len;
+    drive->track_moved = true;
+    drive->track_dirty[head] = true;
+    trace_sony_drive_write_byte(drive, value, drive->track_cyl, pos);
+    return true;
 }
 
 void sony_drive_set_block_backend(SonyDrive *const drive,
@@ -1091,7 +1078,6 @@ void sony_drive_reset(SonyDrive *const drive)
     drive->sectors_per_track = 0;
     drive->total_sectors = 0;
     drive->current_track = 0;
-    drive->current_sector = 0;
     drive->seek_direction = 1;
 
     if (drive->disk_in) {
