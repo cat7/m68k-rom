@@ -28,6 +28,7 @@
 #include "system/system.h"
 #include "target/m68k/cpu.h"
 #include "hw/core/boards.h"
+#include "mac-scsi-compat.h"
 #include "hw/core/or-irq.h"
 #include "elf.h"
 #include "hw/core/loader.h"
@@ -907,23 +908,6 @@ static void mac_quadra_init(Object *obj)
     ms->easc = MAC_QUADRA_MACHINE_GET_CLASS(ms)->model->default_easc;
 }
 
-static GlobalProperty hw_compat_q800[] = {
-    { "scsi-hd", "quirk_mode_page_vendor_specific_apple", "on" },
-    { "scsi-hd", "quirk_mode_page_set_block_size", "on" },
-    { "scsi-hd", "vendor", " SEAGATE" },
-    { "scsi-hd", "product", "          ST225N" },
-    { "scsi-hd", "ver", "1.0 " },
-    { "scsi-cd", "quirk_mode_page_apple_vendor", "on" },
-    { "scsi-cd", "quirk_mode_sense_rom_use_dbd", "on" },
-    { "scsi-cd", "quirk_mode_page_vendor_specific_apple", "on" },
-    { "scsi-cd", "quirk_mode_page_set_block_size", "on" },
-    { "scsi-cd", "quirk_mode_page_truncated", "on" },
-    { "scsi-cd", "vendor", "MATSHITA" },
-    { "scsi-cd", "product", "CD-ROM CR-8005" },
-    { "scsi-cd", "ver", "1.0k" },
-};
-static const size_t hw_compat_q800_len = G_N_ELEMENTS(hw_compat_q800);
-
 static void mac_quadra_machine_class_init(ObjectClass *oc, const void *data)
 {
     static const char * const valid_cpu_types[] = {
@@ -953,7 +937,7 @@ void mac_quadra_model_class_init(ObjectClass *oc, const void *data)
     mqc->model = data;
     mc->desc = mqc->model->desc;
     /* SCSI drives emulate the Apple-branded ones the ROM expects */
-    compat_props_add(mc->compat_props, hw_compat_q800, hw_compat_q800_len);
+    mac_scsi_compat_add(mc);
 }
 
 static const TypeInfo mac_quadra_machine_types[] = {

@@ -33,6 +33,7 @@
 #include "system/address-spaces.h"
 #include "system/block-backend.h"
 #include "hw/core/boards.h"
+#include "mac-scsi-compat.h"
 #include "hw/core/loader.h"
 #include "hw/core/irq.h"
 #include "hw/core/qdev-properties.h"
@@ -627,6 +628,7 @@ static void macii_machine_class_init(ObjectClass *oc, const void *data)
     mmc->model = model;
     mc->desc = model->desc;
     mc->default_cpu_type = model->cpu;
+    mac_scsi_compat_add(mc);
     if (data) {
         return;                 /* a variant: the rest comes from macii */
     }

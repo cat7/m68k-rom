@@ -22,6 +22,7 @@
 #include "system/address-spaces.h"
 #include "system/block-backend.h"
 #include "hw/core/boards.h"
+#include "mac-scsi-compat.h"
 #include "hw/core/loader.h"
 #include "hw/core/irq.h"
 #include "hw/core/or-irq.h"
@@ -643,6 +644,7 @@ static void iifx_machine_class_init(ObjectClass *oc, const void *data)
     mc->valid_cpu_types = valid_cpu_types;
     mc->max_cpus = 1;
     mc->block_default_type = IF_SCSI;
+    mac_scsi_compat_add(mc);
     mc->default_ram_id = "maciifx.ram";
     mc->default_ram_size = 32 * MiB;
     machine_add_audiodev_property(mc);
