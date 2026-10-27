@@ -67,6 +67,8 @@ struct MacIOPState {
     BlockBackend *fd_blk[MAC_IOP_NUM_FD];
     bool fd_in[MAC_IOP_NUM_FD];         /* a disk is in the drive */
     bool fd_polling;                    /* the host wants insert events */
+    QEMUTimer *fd_retry_timer;          /* insert events to send again */
+    bool fd_retry[MAC_IOP_NUM_FD];
     MacIOPFloppyRef fd_ref[MAC_IOP_NUM_FD];
 
     /* IOP-to-host messages not yet in the receive channels */

@@ -309,6 +309,18 @@ static uint16_t mac_iop_fd_format(uint32_t blocks)
     return 0;
 }
 
+/*
+ * The formats the disk in the drive takes: a SuperDrive formats
+ * double-density disks 400K, 800K or 720K, and high-density ones 1440K
+ */
+static uint16_t mac_iop_fd_media_formats(uint32_t blocks)
+{
+    if (blocks == 2880) {
+        return BIT(4);
+    }
+    return blocks ? BIT(1) | BIT(2) | BIT(3) : FD_FORMATS_SUPERDRIVE;
+}
+
 static void mac_iop_fd_status(MacIOPState *s, int i, uint8_t *msg)
 {
     uint32_t blocks = mac_iop_fd_blocks(s, i);
@@ -322,7 +334,7 @@ static void mac_iop_fd_status(MacIOPState *s, int i, uint8_t *msg)
     msg[10] = disk && blocks != 800 ? 0xff : 0;
     put_be32(msg + 14, FD_DRIVE_SUPERDRIVE | (i ? 0x100 : 0));
     put_be16(msg + 22, mac_iop_fd_format(blocks));
-    put_be16(msg + 24, FD_FORMATS_SUPERDRIVE);
+    put_be16(msg + 24, mac_iop_fd_media_formats(blocks));
 }
 
 /* Mac memory for a buffer the host gave; in 24-bit mode only A0-A23 count */
@@ -385,18 +397,51 @@ static int mac_iop_fd_rw(MacIOPState *s, int i, uint8_t *msg, int kind)
     return OS_NOERR;
 }
 
-/* "Formatting" an image: the size stays, the contents go */
-static int mac_iop_fd_format_disk(MacIOPState *s, int i)
+/*
+ * "Formatting" an image: the contents go. @format is the Sony driver's
+ * format number, a place in the list of formats the disk takes (1 =
+ * the first bit of mac_iop_fd_media_formats()). A real double-density
+ * disk has two sides however it was formatted before, so an 800K format
+ * of a 400K image makes it an 800K one.
+ */
+static int mac_iop_fd_format_disk(MacIOPState *s, int i, int format)
 {
     uint32_t blocks = mac_iop_fd_blocks(s, i);
+    uint16_t formats = mac_iop_fd_media_formats(blocks);
     uint8_t zero[512] = { 0 };
     uint32_t n;
+    int bit;
 
     if (!blocks) {
         return OS_OFFLINERR;
     }
     if (!blk_is_writable(s->fd_blk[i])) {
         return OS_WPRERR;
+    }
+    for (bit = 0; bit < 16 && format > 0; bit++) {
+        if ((formats & BIT(bit)) && --format == 0) {
+            break;
+        }
+    }
+    if (bit == 2 && blocks == 800) {
+        BlockBackend *blk = s->fd_blk[i];
+        uint64_t perm, shared;
+        Error *err = NULL;
+        int ret;
+
+        /* the resize permission only for as long as it takes */
+        blk_get_perm(blk, &perm, &shared);
+        ret = blk_set_perm(blk, perm | BLK_PERM_RESIZE, shared, &err);
+        if (ret == 0) {
+            ret = blk_truncate(blk, 1600 * 512, false, PREALLOC_MODE_OFF, 0,
+                               &err);
+            blk_set_perm(blk, perm, shared, &error_abort);
+        }
+        if (ret < 0) {
+            error_reportf_err(err, "floppy: cannot make the 400K image 800K: ");
+            return OS_IOERR;
+        }
+        blocks = 1600;
     }
     for (n = 0; n < blocks; n++) {
         if (blk_pwrite(s->fd_blk[i], (int64_t)n * 512, 512, zero, 0) < 0) {
@@ -417,6 +462,41 @@ static void mac_iop_fd_report_insert(MacIOPState *s, int i)
     msg[0] = FD_EVT_INSERTED;
     msg[1] = i + 1;
     mac_iop_queue_recv(s, IOP_FD_CHAN, msg);
+}
+
+/*
+ * The Sony driver answers an insert message with the result of posting
+ * the disk-inserted event. Early in startup the Event Manager does not
+ * take disk events yet (evtNotEnb), and the driver then forgets the disk:
+ * like the IOP firmware, tell it again a little later. The ROM boots from
+ * drive 1 without the event, which is why only the second drive needs it.
+ */
+#define FD_RETRY_NS     (500 * SCALE_MS)
+
+static void mac_iop_fd_insert_done(MacIOPState *s, const uint8_t *msg)
+{
+    int i = msg[1] - 1;
+
+    if (msg[0] != FD_EVT_INSERTED || i < 0 || i >= MAC_IOP_NUM_FD) {
+        return;
+    }
+    s->fd_retry[i] = msg[2] || msg[3];
+    if (s->fd_retry[i]) {
+        timer_mod(s->fd_retry_timer,
+                  qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL) + FD_RETRY_NS);
+    }
+}
+
+static void mac_iop_fd_retry(void *opaque)
+{
+    MacIOPState *s = opaque;
+
+    for (int i = 0; i < MAC_IOP_NUM_FD; i++) {
+        if (s->fd_retry[i]) {
+            s->fd_retry[i] = false;
+            mac_iop_fd_report_insert(s, i);
+        }
+    }
 }
 
 static void mac_iop_fd_send(MacIOPState *s, uint8_t *msg)
@@ -467,7 +547,7 @@ static void mac_iop_fd_send(MacIOPState *s, uint8_t *msg)
         if (i < 0) {
             err = OS_NSDRVERR;
         } else if (kind == FD_FORMAT) {
-            err = mac_iop_fd_format_disk(s, i);
+            err = mac_iop_fd_format_disk(s, i, msg[4] << 8 | msg[5]);
         } else if (kind == FD_FORMAT_VERIFY) {
             err = mac_iop_fd_blocks(s, i) ? OS_NOERR : OS_OFFLINERR;
         } else {
@@ -544,6 +624,9 @@ static void mac_iop_poll(MacIOPState *s)
 
             trace_mac_iop_recv_done(s->kind, chan);
             *state = IOP_MSG_IDLE;
+            if (s->kind == MAC_IOP_ISM && chan == IOP_FD_CHAN) {
+                mac_iop_fd_insert_done(s, msg);
+            }
             /*
              * The Mac OS ADB driver replies to each ADB message with its
              * next command (or the autopoll setup), rather than sending it
@@ -705,6 +788,8 @@ static void mac_iop_reset_hold(Object *obj, ResetType type)
         s->fd_in[i] = s->fd_blk[i] && blk_is_inserted(s->fd_blk[i]);
     }
     timer_del(s->timer);
+    timer_del(s->fd_retry_timer);
+    memset(s->fd_retry, 0, sizeof(s->fd_retry));
     mac_iop_update_irq(s);
 }
 
@@ -713,6 +798,7 @@ static void mac_iop_realize(DeviceState *dev, Error **errp)
     MacIOPState *s = MAC_IOP(dev);
 
     s->timer = timer_new_ns(QEMU_CLOCK_VIRTUAL, mac_iop_timer, s);
+    s->fd_retry_timer = timer_new_ns(QEMU_CLOCK_VIRTUAL, mac_iop_fd_retry, s);
     adb_register_autopoll_callback(&s->adb_bus, mac_iop_adb_poll, s);
 
     for (int i = 0; i < MAC_IOP_NUM_FD; i++) {
@@ -756,6 +842,8 @@ static const VMStateDescription vmstate_mac_iop = {
         VMSTATE_BOOL(adb_autopoll, MacIOPState),
         VMSTATE_BOOL_ARRAY(fd_in, MacIOPState, MAC_IOP_NUM_FD),
         VMSTATE_BOOL(fd_polling, MacIOPState),
+        VMSTATE_TIMER_PTR(fd_retry_timer, MacIOPState),
+        VMSTATE_BOOL_ARRAY(fd_retry, MacIOPState, MAC_IOP_NUM_FD),
         VMSTATE_END_OF_LIST()
     }
 };
