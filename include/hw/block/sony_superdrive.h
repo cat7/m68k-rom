@@ -13,6 +13,9 @@
 #include <stdint.h>
 #include "hw/block/block.h"
 
+/* bytes on the longest GCR track (zone 0, 394 rpm) */
+#define SONY_GCR_TRACK_MAX  9600
+
 typedef struct {
     BlockBackend *blk;
 
@@ -42,6 +45,14 @@ typedef struct {
     uint16_t xfer_length;
     uint8_t xfer_buffer[1024];
     uint8_t xfer_mark_bitset[1024 / 8];
+
+    /* GCR disks: the track under the head, one ring of disk bytes a side */
+    bool gcr_loaded;
+    bool gcr_dirty[2];
+    uint8_t gcr_cyl;
+    uint16_t gcr_len;
+    uint16_t gcr_pos;
+    uint8_t gcr_track[2][SONY_GCR_TRACK_MAX];
 } SonyDrive;
 
 void sony_drive_set_block_backend(SonyDrive *drive, BlockBackend *block);
