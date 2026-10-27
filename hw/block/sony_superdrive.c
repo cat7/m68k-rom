@@ -444,12 +444,13 @@ static uint64_t sony_lba(SonyDrive *const drive, const uint8_t track,
  * into the image.
  *
  * A ring is as long as a real track: GCR at 2 us bit cells and 394 to 590
- * rpm by zone (self-sync bytes count as one byte here), MFM high density
- * at 500 kbit/s and 300 rpm. MFM tracks have an index pulse where the ring
- * starts, which the Mac waits for when it formats one.
+ * rpm by zone (self-sync bytes count as one byte here), MFM at 300 rpm
+ * and 500 kbit/s (1.44 MB) or 250 kbit/s (720K). MFM tracks have an index
+ * pulse where the ring starts, which the Mac waits for when it formats one.
  */
 static const uint16_t sony_gcr_track_len[] = { 9520, 8740, 7944, 7142, 6356 };
-#define SONY_MFM_TRACK_LEN      12500
+#define SONY_MFM_TRACK_LEN      12500   /* high density */
+#define SONY_MFM_DD_TRACK_LEN   6250
 #define SONY_MFM_INDEX_LEN      100     /* about 1.6 ms */
 #define SONY_MFM_GAP3           84
 
@@ -460,7 +461,10 @@ static uint16_t sony_track_capacity(const SonyDrive *const drive,
 
     QEMU_BUILD_BUG_ON(SONY_TRACK_MAX < 9520 ||
                       SONY_TRACK_MAX < SONY_MFM_TRACK_LEN);
-    return drive->gcr_encode ? sony_gcr_track_len[zone] : SONY_MFM_TRACK_LEN;
+    if (drive->gcr_encode) {
+        return sony_gcr_track_len[zone];
+    }
+    return drive->hd_media ? SONY_MFM_TRACK_LEN : SONY_MFM_DD_TRACK_LEN;
 }
 
 static uint8_t sony_gcr_format_byte(const SonyDrive *const drive)
@@ -666,7 +670,7 @@ static unsigned sony_mfm_fill(SonyDrive *const drive, const uint8_t head,
     return idx + len;
 }
 
-/* One side of an MFM track, IBM System 34 layout, sectors 1-18 in order */
+/* One side of an MFM track, IBM System 34 layout, sectors in order */
 static bool sony_mfm_build_side(SonyDrive *const drive, const uint8_t track,
                                 const uint8_t head)
 {
@@ -1101,6 +1105,12 @@ void sony_drive_reset(SonyDrive *const drive)
                 drive->cylinders = 80;
                 drive->double_sided = false;
                 drive->gcr_encode = true;
+            } else if (drive->total_sectors == 1440) {
+                /* 720 kB (double-sided, double-density MFM). */
+                drive->cylinders = 80;
+                drive->sectors_per_track = 9;
+                drive->double_sided = true;
+                drive->gcr_encode = false;
             } else if (drive->total_sectors == 2880) {
                 /* 1440 kB (double-sided MFM). */
                 drive->cylinders = 80;
