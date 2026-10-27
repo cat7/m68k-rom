@@ -1,3 +1,68 @@
+==========================================
+More 68k Macs for qemu-system-m68k (q700)
+==========================================
+
+This ``q700`` branch is a personal fork of QEMU. It adds seven 68k
+Macintosh models to ``qemu-system-m68k``, next to the Quadra 800 that QEMU
+already has. It is an experiment and is not meant for upstream QEMU.
+
+Machines
+========
+
+============  ======================  =========  ==============================
+Machine       Model                   CPU        ROM
+============  ======================  =========  ==============================
+``macii``     Macintosh II            68020      Mac II or IIx ROM
+``maciix``    Macintosh IIx           68030      IIx ROM
+``maciicx``   Macintosh IIcx          68030      IIx ROM
+``maciifx``   Macintosh IIfx          68030      IIfx ROM
+``q700``      Macintosh Quadra 700    68040      Quadra 700/900 ROM
+``q900``      Macintosh Quadra 900    68040      Quadra 700/900 ROM
+``lc475``     Macintosh LC 475        68LC040    LC 475 ROM
+``q800``      Macintosh Quadra 800    68040      Quadra 800 ROM (upstream)
+============  ======================  =========  ==============================
+
+All of them boot System 7 to the Finder from SCSI disks, CD-ROMs and
+floppies. A/UX 3.0.1 runs on the Quadra 700.
+
+What the branch adds
+====================
+
+- **CPU:** the 68030's on-chip PMMU; 68020/030 bus errors.
+- **SCSI:** an NCR 5380 controller for the Mac II family, the IIfx DMA
+  chip, and the Quadra 900's second (external) bus. SCSI disks and CDs
+  report Apple drive identities, so Apple HD SC Setup accepts them.
+- **Video:** the Quadra 700/900 DAFB with all its Apple monitors (12",
+  13"/VGA, 15" portrait, 16" and 21"). For the Mac II family there is a
+  NuBus video card, ``nubus-video``, with its own declaration ROM and
+  driver. It sits in slot 9 by default.
+- **Floppies:** the original SWIM, the IWM mode for the Mac II family, and
+  the IIfx/Quadra 900 SWIM IOP. Supported images are 400K and 800K (GCR)
+  and 720K and 1.44 MB (MFM). They can be read, written and formatted
+  from the Mac. Choosing Two-Sided when formatting a 400K image grows it
+  to 800K.
+- **Ethernet:** an Apple NuBus Ethernet card, ``nubus-ethernet``, for the
+  Mac II family, and the LC 475 PDS Ethernet card, ``mac-pds-ethernet``.
+- **Other:** the Egret, Cuda and OSS chips, and the IOP for ADB. Mac
+  colours are period-correct, with no gamma compensation.
+
+Using it
+========
+
+Apple ROMs are not included; you need your own ROM image. The Mac ROMs
+time themselves at power-on, so always run with
+``-icount shift=6,align=on``. For example::
+
+  qemu-system-m68k -M q700 -m 64 -bios Quadra700.rom \
+      -icount shift=6,align=on -g 832x624 \
+      -drive file=system7.img,format=raw,media=disk,if=none,id=hd0 \
+      -device scsi-hd,drive=hd0,scsi-id=0
+
+A Mac-style launcher that sets all of this up, and can change floppies
+while a machine runs, is at https://github.com/cat7/Qemu-GUI-m68k.
+
+The rest of this file is QEMU's own README.
+
 ===========
 QEMU README
 ===========
