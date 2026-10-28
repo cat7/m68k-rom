@@ -1,6 +1,7 @@
 /*
  * SONIC Ethernet cards for the Macintosh: the LC processor-direct slot
- * card (mac-pds-ethernet) and the NuBus card (nubus-ethernet)
+ * card (mac-pds-ethernet, and mac-pds-ethernet-virtio with virtio devices
+ * as well) and the NuBus card (nubus-ethernet)
  *
  * Both cards carry a DP83932 SONIC, an address PROM and a declaration ROM
  * at the top of the slot space.  Mac OS picks its driver by the board ID
@@ -14,6 +15,15 @@
  * driver asks Mac OS for physical addresses (GetPhysical), so it needs a
  * System where that call exists; the Mac II family has it only with
  * virtual memory on.
+ *
+ * mac-pds-ethernet-virtio: the same card plus the 32 virtio-mmio devices of
+ * nubus-virtio-mmio, for the LC's only slot.  The virtio devices stay at
+ * +$200 (they fit between the SONIC and the PROM, and in the first MB, so
+ * they work in 24-bit mode too); their goldfish PIC moves from +0 to +$100.
+ * The declaration ROM comes from classicvirtio (declrom-pds, built with
+ * PDS_ETHERNET): board ID 93 and an Ethernet sResource for Mac OS, the
+ * virtio sResources and drivers, and the PIC's place for those drivers.
+ * The SONIC and the PIC share the slot interrupt.
  *
  * nubus-ethernet, board ID 87 or 38 ("Sonic 16 NB"): the card has 128 KB
  * of its own buffer RAM at the start of the slot space, and the driver
@@ -40,6 +50,8 @@
 #include "hw/core/qdev-properties.h"
 #include "hw/nubus/nubus.h"
 #include "hw/nubus/nubus-decl-rom.h"
+#include "hw/intc/goldfish_pic.h"
+#include "hw/virtio/virtio-mmio.h"
 #include "hw/net/dp8393x.h"
 #include "net/net.h"
 #include "system/address-spaces.h"
@@ -48,10 +60,16 @@
 #define TYPE_MAC_ENET_CARD    "mac-enet-card"
 #define TYPE_MAC_PDS_ETHERNET "mac-pds-ethernet"
 #define TYPE_NUBUS_ETHERNET   "nubus-ethernet"
+#define TYPE_MAC_PDS_ETHERNET_VIRTIO "mac-pds-ethernet-virtio"
 OBJECT_DECLARE_SIMPLE_TYPE(MacEnetState, MAC_ENET_CARD)
+OBJECT_DECLARE_SIMPLE_TYPE(MacPdsEnetVirtioState, MAC_PDS_ETHERNET_VIRTIO)
 
 #define PDS_ENET_REGS_OFFSET    0x00000
 #define PDS_ENET_PROM_OFFSET    0x40000
+#define PDS_VIRTIO_PIC_OFFSET   0x100
+#define PDS_VIRTIO_DEV_OFFSET   0x200
+#define PDS_VIRTIO_DEV_SIZE     0x200
+#define PDS_VIRTIO_NUM_DEVICES  32
 #define ENET_PROM_SIZE          0x1000
 
 #define PDS_ENET_BOARD_ID       93      /* Apple "Sonic 16" LC card */
@@ -72,6 +90,16 @@ struct MacEnetState {
     MemoryRegion ram;
     MemoryRegion ctrl;
     uint32_t board_id;
+
+    /* One bit per interrupt source on the card: the slot line is their OR */
+    uint32_t irq_sources;
+};
+
+struct MacPdsEnetVirtioState {
+    MacEnetState parent_obj;
+
+    GoldfishPICState pic;
+    VirtIOMMIOProxy virtio_mmio[PDS_VIRTIO_NUM_DEVICES];
 };
 
 static void enet_build_decl_rom(uint8_t *buf, int size, int board_id,
@@ -130,15 +158,24 @@ static void enet_build_decl_rom(uint8_t *buf, int size, int board_id,
     nubus_decl_rom_finish(&r, dir);
 }
 
+/* Source 0 is the SONIC, source 1 the goldfish PIC */
 static void mac_enet_irq(void *opaque, int n, int level)
 {
-    nubus_set_irq(NUBUS_DEVICE(opaque), level);
+    MacEnetState *s = MAC_ENET_CARD(opaque);
+
+    if (level) {
+        s->irq_sources |= 1u << n;
+    } else {
+        s->irq_sources &= ~(1u << n);
+    }
+    nubus_set_irq(NUBUS_DEVICE(opaque), s->irq_sources != 0);
 }
 
 /*
  * The SONIC, the address PROM and the declaration ROM, common to both
  * cards.  The PROM holds the address bit-reversed, then a check byte that
  * makes all 8 bytes XOR to $FF; byte n is at @first + n * @stride.
+ * With @board_name NULL the declaration ROM is the card's romfile.
  */
 static bool mac_enet_realize_common(MacEnetState *s, DeviceState *dev,
                                     hwaddr regs, int reg_shift,
@@ -168,7 +205,7 @@ static bool mac_enet_realize_common(MacEnetState *s, DeviceState *dev,
     }
     memory_region_add_subregion(&nd->slot_mem, regs,
                                 sysbus_mmio_get_region(sbd, 0));
-    sysbus_connect_irq(sbd, 0, qdev_get_gpio_in_named(dev, "sonic-irq", 0));
+    sysbus_connect_irq(sbd, 0, qdev_get_gpio_in_named(dev, "card-irq", 0));
 
     memory_region_init_rom(&s->prom, OBJECT(dev), "mac-enet.prom",
                            ENET_PROM_SIZE, &error_fatal);
@@ -182,6 +219,9 @@ static bool mac_enet_realize_common(MacEnetState *s, DeviceState *dev,
     prom[first + 7 * stride] = 0xff - checksum;
     memory_region_add_subregion(&nd->slot_mem, prom_at, &s->prom);
 
+    if (!board_name) {
+        return true;
+    }
     memory_region_init_rom(&s->decl_rom, OBJECT(dev), "mac-enet.decl-rom",
                            qemu_target_page_size(), &error_fatal);
     enet_build_decl_rom(memory_region_get_ram_ptr(&s->decl_rom),
@@ -207,6 +247,54 @@ static void mac_pds_ethernet_realize(DeviceState *dev, Error **errp)
                             get_system_memory(),
                             PDS_ENET_PROM_OFFSET, 0, 1, PDS_ENET_BOARD_ID,
                             "QEMU PDS Ethernet", errp);
+}
+
+static void mac_pds_ethernet_virtio_realize(DeviceState *dev, Error **errp)
+{
+    ERRP_GUARD();
+    MacPdsEnetVirtioState *s = MAC_PDS_ETHERNET_VIRTIO(dev);
+    MacEnetState *es = MAC_ENET_CARD(dev);
+    NubusDevice *nd = NUBUS_DEVICE(dev);
+    DeviceClass *pdc = DEVICE_CLASS(object_class_get_parent(
+                                        object_get_class(OBJECT(dev))));
+    SysBusDevice *sbd;
+    int i;
+
+    if (!nd->romfile) {
+        error_setg(errp, "mac-pds-ethernet-virtio needs romfile= "
+                   "(classicvirtio's declrom-pds)");
+        return;
+    }
+    pdc->realize(dev, errp);
+    if (*errp) {
+        return;
+    }
+    if (!mac_enet_realize_common(es, dev, PDS_ENET_REGS_OFFSET, 2,
+                                 get_system_memory(),
+                                 PDS_ENET_PROM_OFFSET, 0, 1,
+                                 PDS_ENET_BOARD_ID, NULL, errp)) {
+        return;
+    }
+
+    sbd = SYS_BUS_DEVICE(&s->pic);
+    if (!sysbus_realize(sbd, errp)) {
+        return;
+    }
+    memory_region_add_subregion(&nd->slot_mem, PDS_VIRTIO_PIC_OFFSET,
+                                sysbus_mmio_get_region(sbd, 0));
+    sysbus_connect_irq(sbd, 0, qdev_get_gpio_in_named(dev, "card-irq", 1));
+
+    for (i = 0; i < PDS_VIRTIO_NUM_DEVICES; i++) {
+        sbd = SYS_BUS_DEVICE(&s->virtio_mmio[i]);
+        qdev_prop_set_bit(DEVICE(sbd), "force-legacy", false);
+        if (!sysbus_realize_and_unref(sbd, errp)) {
+            return;
+        }
+        memory_region_add_subregion(&nd->slot_mem, PDS_VIRTIO_DEV_OFFSET +
+                                    i * PDS_VIRTIO_DEV_SIZE,
+                                    sysbus_mmio_get_region(sbd, 0));
+        sysbus_connect_irq(sbd, 0, qdev_get_gpio_in(DEVICE(&s->pic), i));
+    }
 }
 
 /*
@@ -287,7 +375,21 @@ static void mac_enet_init(Object *obj)
     object_initialize_child(obj, "sonic", &s->sonic, TYPE_DP8393X);
     object_property_add_alias(obj, "mac", OBJECT(&s->sonic), "mac");
     object_property_add_alias(obj, "netdev", OBJECT(&s->sonic), "netdev");
-    qdev_init_gpio_in_named(DEVICE(obj), mac_enet_irq, "sonic-irq", 1);
+    qdev_init_gpio_in_named(DEVICE(obj), mac_enet_irq, "card-irq", 2);
+}
+
+static void mac_pds_ethernet_virtio_init(Object *obj)
+{
+    MacPdsEnetVirtioState *s = MAC_PDS_ETHERNET_VIRTIO(obj);
+    int i;
+
+    object_initialize_child(obj, "pic", &s->pic, TYPE_GOLDFISH_PIC);
+    for (i = 0; i < PDS_VIRTIO_NUM_DEVICES; i++) {
+        g_autofree char *name = g_strdup_printf("virtio-mmio[%d]", i);
+
+        object_initialize_child(obj, name, &s->virtio_mmio[i],
+                                TYPE_VIRTIO_MMIO);
+    }
 }
 
 static void mac_pds_ethernet_class_init(ObjectClass *oc, const void *data)
@@ -296,6 +398,16 @@ static void mac_pds_ethernet_class_init(ObjectClass *oc, const void *data)
 
     dc->realize = mac_pds_ethernet_realize;
     dc->desc = "SONIC Ethernet card for the Macintosh LC PDS slot";
+    set_bit(DEVICE_CATEGORY_NETWORK, dc->categories);
+}
+
+static void mac_pds_ethernet_virtio_class_init(ObjectClass *oc,
+                                               const void *data)
+{
+    DeviceClass *dc = DEVICE_CLASS(oc);
+
+    dc->realize = mac_pds_ethernet_virtio_realize;
+    dc->desc = "SONIC Ethernet and virtio card for the Macintosh LC PDS slot";
     set_bit(DEVICE_CATEGORY_NETWORK, dc->categories);
 }
 
@@ -324,6 +436,12 @@ static const TypeInfo mac_enet_types[] = {
         .name = TYPE_MAC_PDS_ETHERNET,
         .parent = TYPE_MAC_ENET_CARD,
         .class_init = mac_pds_ethernet_class_init,
+    }, {
+        .name = TYPE_MAC_PDS_ETHERNET_VIRTIO,
+        .parent = TYPE_MAC_ENET_CARD,
+        .instance_size = sizeof(MacPdsEnetVirtioState),
+        .instance_init = mac_pds_ethernet_virtio_init,
+        .class_init = mac_pds_ethernet_virtio_class_init,
     }, {
         .name = TYPE_NUBUS_ETHERNET,
         .parent = TYPE_MAC_ENET_CARD,

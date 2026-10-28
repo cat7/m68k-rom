@@ -43,6 +43,13 @@ What the branch adds
   to 800K.
 - **Ethernet:** an Apple NuBus Ethernet card, ``nubus-ethernet``, for the
   Mac II family, and the LC 475 PDS Ethernet card, ``mac-pds-ethernet``.
+- **Shared folder:** a host folder as a Mac disk, through the
+  ``nubus-virtio-mmio`` card, ``virtio-9p-device`` and
+  ``-fsdev local,...,macos_compat=on`` (file types and resource forks).
+  The card's declaration ROM and drivers come from
+  https://github.com/cat7/classicvirtio. The LC 475 has only its PDS
+  slot, so ``mac-pds-ethernet-virtio`` puts the Ethernet card and the
+  virtio devices on one card (ROM: classicvirtio's ``declrom-pds``).
 - **Other:** the Egret, Cuda and OSS chips, and the IOP for ADB. Mac
   colours are period-correct, with no gamma compensation.
 
