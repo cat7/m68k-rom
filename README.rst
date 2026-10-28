@@ -35,7 +35,10 @@ What the branch adds
 - **Video:** the Quadra 700/900 DAFB with all its Apple monitors (12",
   13"/VGA, 15" portrait, 16" and 21"). For the Mac II family there is a
   NuBus video card, ``nubus-video``, with its own declaration ROM and
-  driver. It sits in slot 9 by default.
+  driver. It sits in slot 9 by default. The Quadra 800 has its real 1 MB
+  of video memory, so 832 x 624 offers thousands of colours, not millions.
+  In every depth the gamma table chosen in Monitors applies, as on the
+  real machines.
 - **Floppies:** the original SWIM, the IWM mode for the Mac II family, and
   the IIfx/Quadra 900 SWIM IOP. Supported images are 400K and 800K (GCR)
   and 720K and 1.44 MB (MFM). They can be read, written and formatted
@@ -50,8 +53,7 @@ What the branch adds
   https://github.com/cat7/classicvirtio. The LC 475 has only its PDS
   slot, so ``mac-pds-ethernet-virtio`` puts the Ethernet card and the
   virtio devices on one card (ROM: classicvirtio's ``declrom-pds``).
-- **Other:** the Egret, Cuda and OSS chips, and the IOP for ADB. Mac
-  colours are period-correct, with no gamma compensation.
+- **Other:** the Egret, Cuda and OSS chips, and the IOP for ADB.
 
 Using it
 ========

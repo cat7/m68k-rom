@@ -27,6 +27,7 @@
 #define NUBUS_MinorLength       11
 #define NUBUS_MajorBaseOS       12
 #define NUBUS_MajorLength       13
+#define NUBUS_sGammaDir         64
 #define NUBUS_BoardId           32
 #define NUBUS_PRAMInitData      33
 #define NUBUS_PrimaryInit       34

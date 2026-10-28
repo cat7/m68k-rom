@@ -30,7 +30,9 @@
  * The frame always starts at VRAM offset 0.  The video modes are the
  * depths 1, 2, 4, 8 (indexed through a 256-entry CLUT), 16 (x555) and
  * 32 (x888) bpp of the one resolution chosen at startup; deeper ones are
- * dropped when the VRAM is too small for them.
+ * dropped when the VRAM is too small for them.  In 16 and 32 bpp each
+ * channel goes through the CLUT too, which then holds the gamma curve
+ * (a 5-bit value v looks up entry v << 3 | v >> 2).
  *
  * Registers (32-bit, big-endian, offsets from the register page):
  *
@@ -51,6 +53,7 @@
  */
 
 #include "qemu/osdep.h"
+#include <math.h>
 #include "qemu/units.h"
 #include "qemu/timer.h"
 #include "qemu/log.h"
@@ -161,13 +164,71 @@ static void nv_rom_vpblock(NubusDeclROM *r, NubusVideoState *s, int depth)
     nubus_decl_rom_long(r, 0);                          /* vpPlaneBytes */
 }
 
+/*
+ * Black-and-white 32 x 32 icon of the card (sRsrcIcon), shown by the
+ * Monitors control panel's Options dialog
+ */
+static const uint32_t nv_icon[32] = {
+    0x00000000, 0x00000000, 0x00000000, 0x00000000,
+    0x00000000, 0x00000000, 0x3ffffffc, 0x20000004,
+    0x27e07fc4, 0x24204044, 0x24204044, 0x27e04044,
+    0x20007fc4, 0x20000004, 0x20cccc07, 0x20cccc05,
+    0x20000005, 0x2000fc05, 0x2000fc05, 0x2000fc05,
+    0x20000005, 0x20000007, 0x20000004, 0x3ffffffc,
+    0x0aaaaaa0, 0x0fffffe0, 0x00000000, 0x00000000,
+    0x00000000, 0x00000000, 0x00000000, 0x00000000,
+};
+
+/*
+ * Gamma tables for the Monitors control panel's Options dialog (the
+ * sGammaDir). Each is an sBlock: length,
+ * an ID, a name, then the table (header, then one or three channels of
+ * 256 bytes). Both are computed: Mac standard gamma (1.8 on a 2.5 tube)
+ * and the same with a paper-white point. Mac OS adds Uncorrected itself.
+ */
+static const struct {
+    const char *name;
+    double exponent;
+    uint8_t white[3];
+} nv_gammas[] = {
+    { "Mac Standard Gamma", 1.8 / 2.5, { 0xff, 0xff, 0xff } },
+    { "Page-White Gamma", 1.8 / 2.5, { 0xff, 0xf7, 0xd6 } },
+};
+
+static void nv_rom_gamma(NubusDeclROM *r, int g)
+{
+    int len = strlen(nv_gammas[g].name) + 1;
+    int chans = nv_gammas[g].white[2] == 0xff ? 1 : 3;
+    int c, i;
+
+    len += len & 1;
+    nubus_decl_rom_long(r, 4 + 2 + len + 12 + chans * 256);
+    nubus_decl_rom_word(r, 128 + g);
+    nubus_decl_rom_cstring(r, nv_gammas[g].name);
+    nubus_decl_rom_align(r);
+    nubus_decl_rom_word(r, 0);                  /* gVersion */
+    nubus_decl_rom_word(r, 0);                  /* gType */
+    nubus_decl_rom_word(r, 0);                  /* gFormulaSize */
+    nubus_decl_rom_word(r, chans);              /* gChanCnt */
+    nubus_decl_rom_word(r, 256);                /* gDataCnt */
+    nubus_decl_rom_word(r, 8);                  /* gDataWidth */
+    for (c = 0; c < chans; c++) {
+        for (i = 0; i < 256; i++) {
+            double v = pow(i / 255.0, nv_gammas[g].exponent);
+
+            nubus_decl_rom_byte(r, lround(v * nv_gammas[g].white[c]));
+        }
+    }
+}
+
 static void nubus_video_build_rom(NubusVideoState *s, uint8_t *buf, int size)
 {
     NubusDeclROM r;
     int dir, dir_board, dir_video;
     int b_type, b_name, b_vendor, b_init, v_id, v_rev, v_part;
-    int f_type, f_name, f_drvr, f_base, f_len, d_68000, d_68020;
+    int f_type, f_name, f_icon, f_gamma, f_drvr, f_base, f_len, d_68000, d_68020;
     int f_mode[NUBUS_VIDEO_NDEPTHS], m_params[NUBUS_VIDEO_NDEPTHS];
+    int g_off[ARRAY_SIZE(nv_gammas)];
     int d;
 
     nubus_decl_rom_init(&r, buf, size);
@@ -197,11 +258,13 @@ static void nubus_video_build_rom(NubusVideoState *s, uint8_t *buf, int size)
     nubus_decl_rom_here(&r, dir_video);
     f_type = nubus_decl_rom_entry_off(&r, NUBUS_sRsrcType);
     f_name = nubus_decl_rom_entry_off(&r, NUBUS_sRsrcName);
+    f_icon = nubus_decl_rom_entry_off(&r, NUBUS_sRsrcIcon);
     f_drvr = nubus_decl_rom_entry_off(&r, NUBUS_sRsrcDrvrDir);
     nubus_decl_rom_entry_data(&r, NUBUS_sRsrcFlags, NUBUS_fOpenAtStart);
     nubus_decl_rom_entry_data(&r, NUBUS_sRsrcHWDevId, 1);
     f_base = nubus_decl_rom_entry_off(&r, NUBUS_MinorBaseOS);
     f_len = nubus_decl_rom_entry_off(&r, NUBUS_MinorLength);
+    f_gamma = nubus_decl_rom_entry_off(&r, NUBUS_sGammaDir);
     for (d = 0; d < s->ndepths; d++) {
         f_mode[d] = nubus_decl_rom_entry_off(&r, NV_FIRST_MODE + d);
     }
@@ -235,6 +298,21 @@ static void nubus_video_build_rom(NubusVideoState *s, uint8_t *buf, int size)
     nubus_decl_rom_word(&r, NUBUS_typeVideo);
     nubus_decl_rom_word(&r, NUBUS_drSwApple);
     nubus_decl_rom_word(&r, NV_DRHW);
+
+    nubus_decl_rom_here(&r, f_icon);
+    for (d = 0; d < 32; d++) {
+        nubus_decl_rom_long(&r, nv_icon[d]);
+    }
+
+    nubus_decl_rom_here(&r, f_gamma);
+    for (d = 0; d < ARRAY_SIZE(nv_gammas); d++) {
+        g_off[d] = nubus_decl_rom_entry_off(&r, 128 + d);
+    }
+    nubus_decl_rom_end(&r);
+    for (d = 0; d < ARRAY_SIZE(nv_gammas); d++) {
+        nubus_decl_rom_here(&r, g_off[d]);
+        nv_rom_gamma(&r, d);
+    }
 
     nubus_decl_rom_here(&r, f_base);
     nubus_decl_rom_long(&r, 0);
@@ -288,6 +366,17 @@ static uint32_t nv_clut_pixel(NubusVideoState *s, uint8_t idx)
     return rgb_to_pixel32((c >> 16) & 0xff, (c >> 8) & 0xff, c & 0xff);
 }
 
+/*
+ * In thousands and millions each channel goes through its own column of
+ * the CLUT, where the driver puts the gamma curve
+ */
+static uint32_t nv_direct_pixel(NubusVideoState *s, uint8_t r, uint8_t g,
+                                uint8_t b)
+{
+    return rgb_to_pixel32((s->clut[r] >> 16) & 0xff, (s->clut[g] >> 8) & 0xff,
+                          s->clut[b] & 0xff);
+}
+
 static void nv_draw_line(NubusVideoState *s, uint32_t *d, const uint8_t *p)
 {
     int x, w = s->width;
@@ -314,13 +403,14 @@ static void nv_draw_line(NubusVideoState *s, uint32_t *d, const uint8_t *p)
             uint16_t v = lduw_be_p(p + 2 * x);
             uint8_t r = (v >> 10) & 0x1f, g = (v >> 5) & 0x1f, b = v & 0x1f;
 
-            *d++ = rgb_to_pixel32((r << 3) | (r >> 2), (g << 3) | (g >> 2),
-                                  (b << 3) | (b >> 2));
+            *d++ = nv_direct_pixel(s, (r << 3) | (r >> 2), (g << 3) | (g >> 2),
+                                   (b << 3) | (b >> 2));
         }
         break;
     case 32:
         for (x = 0; x < w; x++) {
-            *d++ = rgb_to_pixel32(p[4 * x + 1], p[4 * x + 2], p[4 * x + 3]);
+            *d++ = nv_direct_pixel(s, p[4 * x + 1], p[4 * x + 2],
+                                   p[4 * x + 3]);
         }
         break;
     }

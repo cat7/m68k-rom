@@ -253,7 +253,7 @@ VidPrime:
 ; Control: A0 = parameter block, A1 = DCE
 
 VidCtl:
-        movem.l d3-d7/a2-a4,-(sp)
+        movem.l d3-d7/a1-a4,-(sp)
         move.l  a0,a4
         GetStorage
         move.l  csParam(a4),a2
@@ -284,8 +284,8 @@ CtlParamErr:
 CtlDone0:
         moveq   #noErr,d0
 CtlDone:
-        move.l  a4,a0
-        movem.l (sp)+,d3-d7/a2-a4
+        move.l  a4,a0                   ; IODone wants A1 = DCE back
+        movem.l (sp)+,d3-d7/a1-a4
 IOExit:
         move.w  ioTrap(a0),d1
         btst    #noQueueBit,d1
@@ -407,7 +407,7 @@ CtlSetGamma:
         move.l  (a2),d0                 ; csGTable
         bne     .table
         bsr     LinearGamma
-        bra     CtlDone0
+        bra     .loaded
 .table:
         move.l  d0,a0
         cmp.w   #256,8(a0)              ; gDataCnt
@@ -433,13 +433,17 @@ CtlSetGamma:
         lea     -256(a0),a0             ; one table for all channels
 .next:
         dbra    d2,.chan
+.loaded:
+        cmp.w   #DIRECT_MODE,pMode(a3)  ; thousands and millions show it
+        blo     CtlDone0                ; at once; 256 colours and fewer
+        bsr     LoadRamp                ; with the next SetEntries
         bra     CtlDone0
 
 ; ---------------------------------------------------------------------
 ; Status: A0 = parameter block, A1 = DCE
 
 VidStatus:
-        movem.l d3-d7/a2-a4,-(sp)
+        movem.l d3-d7/a1-a4,-(sp)
         move.l  a0,a4
         GetStorage
         move.l  csParam(a4),a2
@@ -556,7 +560,8 @@ CheckMode:
         tst.w   d1
         rts
 
-; Set depth D0.w (an spID); load a gray ramp into the CLUT
+; Set depth D0.w (an spID); load a gray ramp into the CLUT, or in
+; thousands and millions the gamma curve
 SetMode:
         movem.l d3-d5,-(sp)
         move.w  d0,pMode(a3)
@@ -565,7 +570,10 @@ SetMode:
         move.l  pRegs(a3),a0
         move.l  d0,REG_MODE(a0)
         cmp.w   #DIRECT_MODE-FIRST_MODE,d0
-        bhs     .done
+        blo     .indexed
+        bsr     LoadRamp
+        bra     .done
+.indexed:
         moveq   #1,d1
         lsl.w   d0,d1                   ; bits per pixel
         moveq   #1,d2
@@ -646,6 +654,30 @@ GrayScreen:
 .pats:
         dc.l    $AAAAAAAA, $CCCCCCCC, $F0F0F0F0, $FF00FF00
         dc.l    $00007FFF, $00000000
+
+; The gamma table into the whole CLUT: in thousands and millions the
+; card looks each colour channel up in it (entry n: red, green and blue
+; for the value n)
+LoadRamp:
+        movem.l d3/a1-a2/a4,-(sp)
+        move.l  pRegs(a3),a0
+        lea     pGammaData(a3),a1       ; red
+        lea     256(a1),a2              ; green
+        lea     512(a1),a4              ; blue
+        clr.l   REG_CLUT_INDEX(a0)
+        move.w  #255,d1
+.entry:
+        moveq   #0,d0
+        move.b  (a1)+,d0
+        swap    d0
+        move.b  (a2)+,d3
+        lsl.w   #8,d3
+        move.b  (a4)+,d3
+        move.w  d3,d0                   ; $00RRGGBB
+        move.l  d0,REG_CLUT_DATA(a0)
+        dbra    d1,.entry
+        movem.l (sp)+,d3/a1-a2/a4
+        rts
 
 ; Linear gamma table into the private storage
 LinearGamma:
