@@ -311,7 +311,14 @@ static void macfb_draw_line16(MacfbState *s, uint8_t *d, uint32_t addr,
     }
 }
 
-/* 24-bit color */
+/*
+ * 24-bit color
+ *
+ * The DAFB's RAMDAC passes each channel of a direct pixel through its own
+ * column of the CLUT, which Mac OS fills with the monitor's gamma curve
+ * (Page-White on the 16" and 21" monitors until another is chosen). Only
+ * with direct-clut: a Linux kernel loaded straight away never fills it.
+ */
 static void macfb_draw_line24(MacfbState *s, uint8_t *d, uint32_t addr,
                               int width)
 {
@@ -323,6 +330,11 @@ static void macfb_draw_line24(MacfbState *s, uint8_t *d, uint32_t addr,
         g = macfb_read_byte(s, addr + 2);
         b = macfb_read_byte(s, addr + 3);
         addr += 4;
+        if (s->direct_clut) {
+            r = s->color_palette[r * 3];
+            g = s->color_palette[g * 3 + 1];
+            b = s->color_palette[b * 3 + 2];
+        }
 
         *(uint32_t *)d = rgb_to_pixel32(r, g, b);
         d += 4;
@@ -711,9 +723,7 @@ static void macfb_ctrl_write(void *opaque,
         s->color_palette[s->palette_current] = val & 0xff;
         s->palette_current = (s->palette_current + 1) %
                              ARRAY_SIZE(s->color_palette);
-        if (s->palette_current % 3) {
-            macfb_invalidate_display(s);
-        }
+        macfb_invalidate_display(s);
         break;
     default:
         if (addr < MACFB_CTRL_TOPADDR) {
@@ -946,6 +956,7 @@ static const Property macfb_nubus_properties[] = {
                        MACFB_VRAM_WINDOW),
     DEFINE_PROP_UINT32("config-strap", MacfbNubusState, macfb.config_strap, 0),
     DEFINE_PROP_BOOL("lc-layout", MacfbNubusState, macfb.lc_layout, false),
+    DEFINE_PROP_BOOL("direct-clut", MacfbNubusState, macfb.direct_clut, false),
     DEFINE_PROP_UINT32("width", MacfbNubusState, macfb.width, 640),
     DEFINE_PROP_UINT32("height", MacfbNubusState, macfb.height, 480),
     DEFINE_PROP_UINT8("depth", MacfbNubusState, macfb.depth, 8),

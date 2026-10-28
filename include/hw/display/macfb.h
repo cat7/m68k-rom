@@ -73,6 +73,7 @@ typedef struct MacfbState {
 
     uint32_t regs[MACFB_NUM_REGS];
     bool lc_layout;               /* the LC 475 ROM's frame layouts */
+    bool direct_clut;             /* 24-bit pixels go through the CLUT */
     const MacFbMode *mode;
 
     QEMUTimer *vbl_timer;
