@@ -31,6 +31,9 @@ static const MacQuadraModel q800_model = {
      */
     .nubus_slots = BIT(0x9) | BIT(0xc) | BIT(0xd) | BIT(0xe),
     .max_ram_size = 1 * GiB,
+    /* 512 KiB on board plus one VRAM SIMM, as on the real machine */
+    .vram_size = 1 * MiB,
+    .ramdac_16bpp = true,
 };
 
 static const TypeInfo q800_machine_types[] = {

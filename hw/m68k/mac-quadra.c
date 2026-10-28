@@ -730,11 +730,11 @@ static void q800_machine_init(MachineState *machine)
                          graphic_height ?: (model->fb_height ?: 600));
     qdev_prop_set_uint8(dev, "depth",
                         graphic_depth ?: (model->fb_depth ?: 8));
-    if (model->vram_size) {
+    if (model->vram_size && (!linux_boot || !model->ramdac_16bpp)) {
         qdev_prop_set_uint32(dev, "vram-size", model->vram_size);
     }
-    if (model->lc_video) {
-        qdev_prop_set_bit(dev, "lc-layout", true);
+    if (model->ramdac_16bpp && !linux_boot) {
+        qdev_prop_set_bit(dev, "ramdac-indexed", true);
     }
     /* Mac OS loads a gamma curve for millions of colours; Linux does not */
     qdev_prop_set_bit(dev, "direct-clut", !linux_boot);

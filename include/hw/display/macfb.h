@@ -47,7 +47,7 @@ typedef struct MacFbMode {
     uint32_t height;
     uint32_t stride;
     uint32_t offset;
-    bool lc;                      /* LC 475 layout: only with lc-layout */
+    bool vram_1m;                 /* layout used with 1 MiB of VRAM: only then */
 } MacFbMode;
 
 #define MACFB_CTRL_TOPADDR  0x200
@@ -72,8 +72,11 @@ typedef struct MacfbState {
     uint8_t type;
 
     uint32_t regs[MACFB_NUM_REGS];
-    bool lc_layout;               /* the LC 475 ROM's frame layouts */
     bool direct_clut;             /* 24-bit pixels go through the CLUT */
+    bool ramdac_indexed;          /* 0x220 is an indexed register file:
+                                     the RAMDAC with 16 bpp */
+    uint8_t ramdac_index;
+    uint8_t ramdac_regs[256];
     const MacFbMode *mode;
 
     QEMUTimer *vbl_timer;

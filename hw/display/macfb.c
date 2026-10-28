@@ -40,6 +40,7 @@
 #define DAFB_INTR_STAT      0x108
 #define DAFB_INTR_CLEAR     0x10c
 #define DAFB_LUT_INDEX      0x200
+#define DAFB_RAMDAC_CTRL    0x220
 #define DAFB_LUT            0x210
 
 #define DAFB_INTR_VBL   0x4
@@ -120,9 +121,25 @@ static const MacFbMode macfb_mode_table[] = {
     { MACFB_DISPLAY_APPLE_21_COLOR, 8, 0x120, 0x5ff, 1152, 870, 0x480, 0x80 },
 
     /*
-     * The LC 475 ROM programs the Quadra 700 values below, but starts the
-     * 16" and 21" Color pictures at 0x80 rather than 0xe00 (lc-layout).
+     * With 1 MiB of VRAM (vram_1m) the ROMs start the 16" and 21" Color
+     * pictures at 0x80 rather than 0xe00. The LC 475 ROM programs the
+     * Quadra 700 values; the Quadra 800 ROM its own, and with its RAMDAC
+     * that has 16 bpp (ramdac-indexed) it offers thousands of colours.
      */
+    { MACFB_DISPLAY_16_COLOR, 1, 0xd0, 0x70e, 832, 624, 0x340, 0x80, true },
+    { MACFB_DISPLAY_16_COLOR, 2, 0xd0, 0x706, 832, 624, 0x340, 0x80, true },
+    { MACFB_DISPLAY_16_COLOR, 4, 0xd0, 0x702, 832, 624, 0x340, 0x80, true },
+    { MACFB_DISPLAY_16_COLOR, 8, 0xd0, 0x700, 832, 624, 0x340, 0x80, true },
+    { MACFB_DISPLAY_16_COLOR, 16, 0x1a0, 0x7ff, 832, 624, 0x680, 0x80, true },
+    { MACFB_DISPLAY_VGA, 16, 0x200, 0x700, 640, 480, 0x800, 0x1000, true },
+    { MACFB_DISPLAY_APPLE_12_RGB, 16, 0x100, 0x700, 512, 384, 0x400, 0x1000,
+      true },
+    { MACFB_DISPLAY_APPLE_21_COLOR, 2, 0x90, 0x702, 1152, 870, 0x240, 0x80,
+      true },
+    { MACFB_DISPLAY_APPLE_21_COLOR, 4, 0x90, 0x700, 1152, 870, 0x240, 0x80,
+      true },
+    { MACFB_DISPLAY_APPLE_21_COLOR, 8, 0x120, 0x7ff, 1152, 870, 0x480, 0x80,
+      true },
     { MACFB_DISPLAY_16_COLOR, 1, 0xd0, 0x60e, 832, 624, 0x340, 0x80, true },
     { MACFB_DISPLAY_16_COLOR, 2, 0xd0, 0x606, 832, 624, 0x340, 0x80, true },
     { MACFB_DISPLAY_16_COLOR, 4, 0xd0, 0x602, 832, 624, 0x340, 0x80, true },
@@ -305,6 +322,12 @@ static void macfb_draw_line16(MacfbState *s, uint8_t *d, uint32_t addr,
         g = ((pixel >> 5) & 0x1f) << 3;
         b = (pixel & 0x1f) << 3;
         addr += 2;
+        if (s->direct_clut) {
+            /* Mac OS loads the gamma curve into entries 0, 8, 16 ... 255 */
+            r = s->color_palette[(r | r >> 5) * 3];
+            g = s->color_palette[(g | g >> 5) * 3 + 1];
+            b = s->color_palette[(b | b >> 5) * 3 + 2];
+        }
 
         *(uint32_t *)d = rgb_to_pixel32(r, g, b);
         d += 4;
@@ -314,7 +337,8 @@ static void macfb_draw_line16(MacfbState *s, uint8_t *d, uint32_t addr,
 /*
  * 24-bit color
  *
- * The DAFB's RAMDAC passes each channel of a direct pixel through its own
+ * The DAFB's RAMDAC passes each channel of a direct pixel (here and in
+ * 16-bit color) through its own
  * column of the CLUT, which Mac OS fills with the monitor's gamma curve
  * (Page-White on the 16" and 21" monitors until another is chosen). Only
  * with direct-clut: a Linux kernel loaded straight away never fills it.
@@ -504,7 +528,7 @@ static void macfb_mode_write(MacfbState *s)
         macfb_mode = &macfb_mode_table[i];
 
         if (s->type != macfb_mode->type ||
-            (macfb_mode->lc && !s->lc_layout)) {
+            (macfb_mode->vram_1m && s->vram_size > MiB)) {
             continue;
         }
 
@@ -519,7 +543,8 @@ static void macfb_mode_write(MacfbState *s)
     }
 }
 
-static const MacFbMode *macfb_find_mode(MacfbDisplayType display_type,
+static const MacFbMode *macfb_find_mode(MacfbState *s,
+                                  MacfbDisplayType display_type,
                                   uint16_t width, uint16_t height,
                                   uint8_t depth)
 {
@@ -529,6 +554,9 @@ static const MacFbMode *macfb_find_mode(MacfbDisplayType display_type,
     for (i = 0; i < ARRAY_SIZE(macfb_mode_table); i++) {
         macfb_mode = &macfb_mode_table[i];
 
+        if (macfb_mode->vram_1m && s->vram_size > MiB) {
+            continue;
+        }
         if (display_type == macfb_mode->type && width == macfb_mode->width &&
                 height == macfb_mode->height && depth == macfb_mode->depth) {
             return macfb_mode;
@@ -644,6 +672,13 @@ static uint64_t macfb_ctrl_read(void *opaque,
     case DAFB_MODE_SENSE:
         val = macfb_sense_read(s);
         break;
+    case DAFB_RAMDAC_CTRL:
+        if (s->ramdac_indexed) {
+            val = s->ramdac_regs[s->ramdac_index];
+        } else {
+            val = s->regs[addr >> 2];
+        }
+        break;
     case DAFB_LUT ... DAFB_LUT + 3:
         val = s->color_palette[s->palette_current];
         s->palette_current = (s->palette_current + 1) %
@@ -718,6 +753,11 @@ static void macfb_ctrl_write(void *opaque,
         break;
     case DAFB_LUT_INDEX:
         s->palette_current = (val & 0xff) * 3;
+        s->ramdac_index = val & 0xff;
+        break;
+    case DAFB_RAMDAC_CTRL:
+        s->regs[addr >> 2] = val;
+        s->ramdac_regs[s->ramdac_index] = val;
         break;
     case DAFB_LUT ... DAFB_LUT + 3:
         s->color_palette[s->palette_current] = val & 0xff;
@@ -776,14 +816,14 @@ static bool macfb_common_realize(DeviceState *dev, MacfbState *s, Error **errp)
         s->type = MACFB_DISPLAY_APPLE_21_COLOR;
     }
 
-    s->mode = macfb_find_mode(s->type, s->width, s->height, s->depth);
+    s->mode = macfb_find_mode(s, s->type, s->width, s->height, s->depth);
     if (!s->mode) {
         /* pick the monitor that offers this mode (e.g. 512x384: 12" RGB) */
         for (int i = 0; i < ARRAY_SIZE(macfb_mode_table); i++) {
             const MacFbMode *m = &macfb_mode_table[i];
 
             if (m->width == s->width && m->height == s->height &&
-                m->depth == s->depth && (!m->lc || s->lc_layout)) {
+                m->depth == s->depth && (!m->vram_1m || s->vram_size <= MiB)) {
                 s->type = m->type;
                 s->mode = m;
                 break;
@@ -955,8 +995,9 @@ static const Property macfb_nubus_properties[] = {
     DEFINE_PROP_UINT32("vram-size", MacfbNubusState, macfb.vram_size,
                        MACFB_VRAM_WINDOW),
     DEFINE_PROP_UINT32("config-strap", MacfbNubusState, macfb.config_strap, 0),
-    DEFINE_PROP_BOOL("lc-layout", MacfbNubusState, macfb.lc_layout, false),
     DEFINE_PROP_BOOL("direct-clut", MacfbNubusState, macfb.direct_clut, false),
+    DEFINE_PROP_BOOL("ramdac-indexed", MacfbNubusState, macfb.ramdac_indexed,
+                     false),
     DEFINE_PROP_UINT32("width", MacfbNubusState, macfb.width, 640),
     DEFINE_PROP_UINT32("height", MacfbNubusState, macfb.height, 480),
     DEFINE_PROP_UINT8("depth", MacfbNubusState, macfb.depth, 8),

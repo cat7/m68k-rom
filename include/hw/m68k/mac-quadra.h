@@ -87,7 +87,11 @@ typedef struct MacQuadraModel {
     uint32_t fb_width, fb_height;
     uint8_t fb_depth;
     uint32_t vram_size;           /* on-board VRAM (0: 4 MiB) */
-    bool lc_video;                /* LC 475 frame layouts (macfb lc-layout) */
+    /*
+     * The video's RAMDAC has 16 bpp (thousands of colours); only with the
+     * real VRAM size, so not for a Linux kernel loaded with -kernel
+     */
+    bool ramdac_16bpp;
 } MacQuadraModel;
 
 struct MacQuadraMachineClass {
