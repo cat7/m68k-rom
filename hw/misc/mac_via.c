@@ -918,8 +918,12 @@ static void via1_auxmode_update(MOS6522Q800VIA1State *v1s)
 #define MACOS_TIMEDBRA_VALUE  (0x2a00 * 3)
 #define MACOS_TIMESCCB_VALUE  (0x079d * 3)
 
-static bool via1_is_toolbox_timer_calibrated(void)
+static bool via1_is_toolbox_timer_calibrated(MOS6522Q800VIA1State *v1s)
 {
+    if (v1s->timer_hack_rearmed) {
+        return false;
+    }
+
     /*
      * Indicate whether the MacOS toolbox has been calibrated by checking
      * for the value of our magic constants
@@ -953,7 +957,7 @@ static void via1_timer_calibration_hack(MOS6522Q800VIA1State *v1s, int addr,
     case 1:
         if (addr == VIA_REG_T2CL && val == 0xc) {
             /* VIA_REG_T2CL: low byte of 1ms counter */
-            if (!via1_is_toolbox_timer_calibrated()) {
+            if (!via1_is_toolbox_timer_calibrated(v1s)) {
                 v1s->timer_hack_state = 2;
             } else {
                 v1s->timer_hack_state = 0;
@@ -966,7 +970,7 @@ static void via1_timer_calibration_hack(MOS6522Q800VIA1State *v1s, int addr,
              * VIA_REG_T2CH: high byte of 1ms counter (very likely at the
              * start of SETUPTIMEK)
              */
-            if (!via1_is_toolbox_timer_calibrated()) {
+            if (!via1_is_toolbox_timer_calibrated(v1s)) {
                 v1s->timer_hack_state = 3;
             } else {
                 v1s->timer_hack_state = 0;
@@ -991,6 +995,7 @@ static void via1_timer_calibration_hack(MOS6522Q800VIA1State *v1s, int addr,
                         MACOS_TIMESCCB_VALUE);
 
             v1s->timer_hack_state = 4;
+            v1s->timer_hack_rearmed = false;
         }
         break;
     case 4:
@@ -1049,6 +1054,20 @@ static void via1_timer_calibration_hack(MOS6522Q800VIA1State *v1s, int addr,
     if (old_timer_hack_state != v1s->timer_hack_state) {
         trace_via1_timer_hack_state(v1s->timer_hack_state);
     }
+}
+
+/*
+ * Restart in Mac OS jumps back into the ROM, which runs RESET and then
+ * calibrates its timing loops again. TimeDBRA still holds the value from
+ * the last start-up, so calibrate regardless. Cuda machines never write
+ * the PCR value that otherwise re-arms the hack: without this the ROM's
+ * own count overflows to 0 and it stops with a divide-by-zero Sad Mac.
+ */
+void mac_via1_cpu_reset(MOS6522Q800VIA1State *v1s)
+{
+    v1s->timer_hack_state = 1;
+    v1s->timer_hack_rearmed = true;
+    trace_via1_timer_hack_state(v1s->timer_hack_state);
 }
 
 /*
@@ -1832,6 +1851,7 @@ static void mos6522_q800_via1_reset_hold(Object *obj, ResetType type)
      * than writing the 0x22 the hack waits for, so start it armed.
      */
     v1s->timer_hack_state = v1s->cuda ? 1 : 0;
+    v1s->timer_hack_rearmed = false;
 
     qemu_set_irq(v1s->headsel_irq, 0);
     via1_overlay_update(v1s);

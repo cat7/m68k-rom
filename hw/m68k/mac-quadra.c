@@ -112,7 +112,8 @@ static void main_cpu_reset(void *opaque)
 
 /*
  * The RESET instruction (run by the ROM when Mac OS restarts) resets the
- * cards in the NuBus slots, so that none keeps interrupting
+ * cards in the NuBus slots, so that none keeps interrupting, and VIA1
+ * gets the ROM's timing loops calibrated again
  */
 static void mac_quadra_reset_out(void *opaque, int n, int level)
 {
@@ -124,6 +125,7 @@ static void mac_quadra_reset_out(void *opaque, int n, int level)
     if (!level) {
         return;
     }
+    mac_via1_cpu_reset(&m->via1);
     QTAILQ_FOREACH(kid, &bus->children, sibling) {
         if (kid->child != DEVICE(&m->macfb)) {
             device_cold_reset(kid->child);

@@ -95,6 +95,7 @@ struct MOS6522Q800VIA1State {
 
     /* SETUPTIMEK hack */
     int timer_hack_state;
+    bool timer_hack_rearmed;  /* after RESET: calibrate even if done before */
 
     /*
      * Cuda (LC 475, Quadra 605 and later): ADB, RTC and PRAM sit behind a
@@ -144,6 +145,9 @@ struct MOS6522Q800VIA1State {
 
 #define TYPE_MOS6522_Q800_VIA2 "mos6522-q800-via2"
 OBJECT_DECLARE_SIMPLE_TYPE(MOS6522Q800VIA2State, MOS6522_Q800_VIA2)
+
+/* The CPU ran RESET: the ROM is starting up again (Restart) */
+void mac_via1_cpu_reset(MOS6522Q800VIA1State *v1s);
 
 struct MOS6522Q800VIA2State {
     /*< private >*/
