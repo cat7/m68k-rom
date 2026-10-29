@@ -100,14 +100,19 @@ static void swim2_headsel(void *opaque, int n, int level)
     swim2_set_sel(opaque, level);
 }
 
+/*
+ * At reset the ROM is overlaid at address 0, so the CPU always fetches
+ * the ROM's vectors. RAM at 0 and 4 holds whatever Mac OS left there,
+ * which matters when it restarts through Cuda (Mac OS 8 on the LC 475).
+ */
 static void main_cpu_reset(void *opaque)
 {
-    M68kCPU *cpu = opaque;
-    CPUState *cs = CPU(cpu);
+    MacQuadraMachineState *m = opaque;
+    M68kCPU *cpu = &m->cpu;
 
-    cpu_reset(cs);
-    cpu->env.aregs[7] = ldl_phys(cs->as, 0);
-    cpu->env.pc = ldl_phys(cs->as, 4);
+    cpu_reset(CPU(cpu));
+    cpu->env.aregs[7] = m->reset_sp;
+    cpu->env.pc = m->reset_pc;
 }
 
 /*
@@ -372,7 +377,7 @@ static void q800_machine_init(MachineState *machine)
     /* init CPUs */
     object_initialize_child(OBJECT(machine), "cpu", &m->cpu, machine->cpu_type);
     qdev_realize(DEVICE(&m->cpu), NULL, &error_fatal);
-    qemu_register_reset(main_cpu_reset, &m->cpu);
+    qemu_register_reset(main_cpu_reset, m);
 
     /* RAM */
     memory_region_init_io(&m->ramio, OBJECT(machine), &ramio_ops, &m->ramio,
@@ -773,6 +778,8 @@ static void q800_machine_init(MachineState *machine)
             exit(1);
         }
         stl_phys(cs->as, 4, elf_entry); /* reset initial PC */
+        m->reset_sp = 0;
+        m->reset_pc = elf_entry;
         parameters_base = (high + 1) & ~1;
         param_ptr = param_blob;
 
@@ -885,9 +892,10 @@ static void q800_machine_init(MachineState *machine)
 
             ptr = rom_ptr(MACROM_ADDR, bios_size);
             assert(ptr != NULL);
-            stl_phys(cs->as, 0, ldl_be_p(ptr));    /* reset initial SP */
-            stl_phys(cs->as, 4,
-                     MACROM_ADDR + ldl_be_p(ptr + 4)); /* reset initial PC */
+            m->reset_sp = ldl_be_p(ptr);
+            m->reset_pc = MACROM_ADDR + ldl_be_p(ptr + 4);
+            stl_phys(cs->as, 0, m->reset_sp);    /* reset initial SP */
+            stl_phys(cs->as, 4, m->reset_pc);    /* reset initial PC */
         }
     }
 }

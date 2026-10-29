@@ -110,6 +110,9 @@ struct MacQuadraMachineState {
 
     bool easc;
     M68kCPU cpu;
+    /* what the CPU fetches at reset, with the ROM overlaid at address 0 */
+    uint32_t reset_sp;
+    uint32_t reset_pc;
     MemoryRegion rom;
     MemoryRegion rom_alias;
     MemoryRegion rom_mirror[16];

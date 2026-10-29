@@ -1847,6 +1847,14 @@ static void mos6522_q800_via1_reset_hold(Object *obj, ResetType type)
     v1s->alt = REG_EMPTY;
 
     /*
+     * GLUE resets to A/UX mode too (vMystery clear). Without this a reset
+     * from Cuda (Mac OS 8 Restart on the LC 475) keeps the old bit, the
+     * ROM's switch back to classic mode goes unnoticed and VIA1 then
+     * interrupts at level 6, which the ROM never clears.
+     */
+    v1s->last_b = ms->b;
+
+    /*
      * Timer calibration hack. Cuda machines leave VIA1 PCR at 0 rather
      * than writing the 0x22 the hack waits for, so start it armed.
      */
