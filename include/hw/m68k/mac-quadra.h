@@ -92,6 +92,11 @@ typedef struct MacQuadraModel {
      * real VRAM size, so not for a Linux kernel loaded with -kernel
      */
     bool ramdac_16bpp;
+    /*
+     * In 16 bpp the RAMDAC passes pixels straight through: the LC 475 ROM
+     * never loads the CLUT for thousands of colours
+     */
+    bool thousands_unmapped;
 } MacQuadraModel;
 
 struct MacQuadraMachineClass {

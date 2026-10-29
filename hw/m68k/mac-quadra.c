@@ -736,8 +736,9 @@ static void q800_machine_init(MachineState *machine)
     if (model->ramdac_16bpp && !linux_boot) {
         qdev_prop_set_bit(dev, "ramdac-indexed", true);
     }
-    /* Mac OS loads a gamma curve for millions of colours; Linux does not */
+    /* Mac OS loads a gamma curve for direct colours; Linux does not */
     qdev_prop_set_bit(dev, "direct-clut", !linux_boot);
+    qdev_prop_set_bit(dev, "clut-16bpp", !model->thousands_unmapped);
     qdev_realize(dev, BUS(nubus), &error_fatal);
 
     macfb_mode = (NUBUS_MACFB(dev)->macfb).mode;

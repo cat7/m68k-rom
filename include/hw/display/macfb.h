@@ -72,7 +72,8 @@ typedef struct MacfbState {
     uint8_t type;
 
     uint32_t regs[MACFB_NUM_REGS];
-    bool direct_clut;             /* 24-bit pixels go through the CLUT */
+    bool direct_clut;             /* direct pixels go through the CLUT */
+    bool clut_16bpp;              /* ... in 16 bpp too (else straight) */
     bool ramdac_indexed;          /* 0x220 is an indexed register file:
                                      the RAMDAC with 16 bpp */
     uint8_t ramdac_index;

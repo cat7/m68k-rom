@@ -122,9 +122,9 @@ static const MacFbMode macfb_mode_table[] = {
 
     /*
      * With 1 MiB of VRAM (vram_1m) the ROMs start the 16" and 21" Color
-     * pictures at 0x80 rather than 0xe00. The LC 475 ROM programs the
-     * Quadra 700 values; the Quadra 800 ROM its own, and with its RAMDAC
-     * that has 16 bpp (ramdac-indexed) it offers thousands of colours.
+     * pictures at 0x80 rather than 0xe00. With the RAMDAC that has 16 bpp
+     * (ramdac-indexed) both ROMs offer thousands of colours. The Quadra
+     * 800 ROM programs these values; the LC 475 ROM its own, below.
      */
     { MACFB_DISPLAY_16_COLOR, 1, 0xd0, 0x70e, 832, 624, 0x340, 0x80, true },
     { MACFB_DISPLAY_16_COLOR, 2, 0xd0, 0x706, 832, 624, 0x340, 0x80, true },
@@ -153,17 +153,86 @@ static const MacFbMode macfb_mode_table[] = {
     { MACFB_DISPLAY_APPLE_21_COLOR, 8, 0x120, 0x4ff, 1152, 870, 0x480, 0x80,
       true },
 
+    /* Quadra 800, VGA monitor switched to 800x600 (then CTRL2 0x5xx) */
+    { MACFB_DISPLAY_VGA, 1, 0xd0, 0x70e, 800, 600, 0x340, 0x80, true },
+    { MACFB_DISPLAY_VGA, 2, 0xd0, 0x706, 800, 600, 0x340, 0x80, true },
+    { MACFB_DISPLAY_VGA, 4, 0xd0, 0x702, 800, 600, 0x340, 0x80, true },
+    { MACFB_DISPLAY_VGA, 8, 0xd0, 0x700, 800, 600, 0x340, 0x80, true },
+    { MACFB_DISPLAY_VGA, 16, 0x1a0, 0x7ff, 800, 600, 0x680, 0x80, true },
+
+    /*
+     * LC 475 when the depth or the VGA monitor's 800x600 setting is chosen
+     * in Monitors: the Quadra 700 values, the frame as above
+     */
+    { MACFB_DISPLAY_APPLE_12_RGB, 16, 0x100, 0x600, 512, 384, 0x400, 0x1000,
+      true },
+    { MACFB_DISPLAY_VGA, 16, 0x200, 0x600, 640, 480, 0x800, 0x1000, true },
+    { MACFB_DISPLAY_16_COLOR, 16, 0x1a0, 0x6ff, 832, 624, 0x680, 0x80, true },
+    { MACFB_DISPLAY_VGA, 1, 0xd0, 0x60e, 800, 600, 0x340, 0x80, true },
+    { MACFB_DISPLAY_VGA, 2, 0xd0, 0x606, 800, 600, 0x340, 0x80, true },
+    { MACFB_DISPLAY_VGA, 4, 0xd0, 0x602, 800, 600, 0x340, 0x80, true },
+    { MACFB_DISPLAY_VGA, 8, 0xd0, 0x600, 800, 600, 0x340, 0x80, true },
+    { MACFB_DISPLAY_VGA, 16, 0x1a0, 0x6ff, 800, 600, 0x680, 0x80, true },
+
+    /*
+     * LC 475 with 1 MiB of VRAM and the 16 bpp RAMDAC, as its ROM programs
+     * them (at start-up it first writes the Quadra 700 values above).
+     * Thousands of colours on the 12", 13" and 16" monitors.
+     */
+    { MACFB_DISPLAY_APPLE_12_RGB, 1, 0x100, 0x25e, 512, 384, 0x400, 0x1000,
+      true },
+    { MACFB_DISPLAY_APPLE_12_RGB, 2, 0x100, 0x28e, 512, 384, 0x400, 0x1000,
+      true },
+    { MACFB_DISPLAY_APPLE_12_RGB, 4, 0x100, 0x246, 512, 384, 0x400, 0x1000,
+      true },
+    { MACFB_DISPLAY_APPLE_12_RGB, 8, 0x100, 0x242, 512, 384, 0x400, 0x1000,
+      true },
+    { MACFB_DISPLAY_APPLE_12_RGB, 16, 0x100, 0x240, 512, 384, 0x400, 0x1000,
+      true },
+    { MACFB_DISPLAY_VGA, 1, 0x100, 0x15e, 640, 480, 0x400, 0x1000, true },
+    { MACFB_DISPLAY_VGA, 2, 0x100, 0x10e, 640, 480, 0x400, 0x1000, true },
+    { MACFB_DISPLAY_VGA, 4, 0x100, 0x106, 640, 480, 0x400, 0x1000, true },
+    { MACFB_DISPLAY_VGA, 8, 0x100, 0x142, 640, 480, 0x400, 0x1000, true },
+    { MACFB_DISPLAY_VGA, 16, 0x200, 0x140, 640, 480, 0x800, 0x1000, true },
+    { MACFB_DISPLAY_APPLE_PORTRAIT, 1, 0x80, 0x38e, 640, 870, 0x200, 0x1000,
+      true },
+    { MACFB_DISPLAY_APPLE_PORTRAIT, 2, 0x80, 0x386, 640, 870, 0x200, 0x1000,
+      true },
+    { MACFB_DISPLAY_APPLE_PORTRAIT, 4, 0x80, 0x3c2, 640, 870, 0x200, 0x1000,
+      true },
+    { MACFB_DISPLAY_APPLE_PORTRAIT, 8, 0x100, 0x380, 640, 870, 0x400, 0x1000,
+      true },
+    { MACFB_DISPLAY_16_COLOR, 1, 0xd0, 0x20e, 832, 624, 0x340, 0x80, true },
+    { MACFB_DISPLAY_16_COLOR, 2, 0xd0, 0x206, 832, 624, 0x340, 0x80, true },
+    { MACFB_DISPLAY_16_COLOR, 4, 0xd0, 0x242, 832, 624, 0x340, 0x80, true },
+    { MACFB_DISPLAY_16_COLOR, 8, 0xd0, 0x200, 832, 624, 0x340, 0x80, true },
+    { MACFB_DISPLAY_16_COLOR, 16, 0x1a0, 0x23f, 832, 624, 0x680, 0x80, true },
+    { MACFB_DISPLAY_APPLE_21_COLOR, 1, 0x90, 0x386, 1152, 870, 0x240, 0x80,
+      true },
+    { MACFB_DISPLAY_APPLE_21_COLOR, 2, 0x90, 0x382, 1152, 870, 0x240, 0x80,
+      true },
+    { MACFB_DISPLAY_APPLE_21_COLOR, 4, 0x90, 0x380, 1152, 870, 0x240, 0x80,
+      true },
+    { MACFB_DISPLAY_APPLE_21_COLOR, 8, 0x120, 0x3ff, 1152, 870, 0x480, 0x80,
+      true },
+
     /*
      * Quadra 700 DAFB modes, as the Quadra 700 ROM programs them for each
      * monitor sense code (CTRL2 bits 11-8 differ from the Quadra 800).
      * Layouts read from the guest's ScreenRow, ScrnBase and main GDevice;
-     * "24" is the 32 bits per pixel mode. 640x480 also serves VGA.
+     * "24" is the 32 bits per pixel mode. 640x480 also serves VGA, which
+     * can be switched to 800x600 in Monitors.
      */
     { MACFB_DISPLAY_VGA, 1, 0x100, 0x61e, 640, 480, 0x400, 0x1000 },
     { MACFB_DISPLAY_VGA, 2, 0x100, 0x60e, 640, 480, 0x400, 0x1000 },
     { MACFB_DISPLAY_VGA, 4, 0x100, 0x606, 640, 480, 0x400, 0x1000 },
     { MACFB_DISPLAY_VGA, 8, 0x100, 0x602, 640, 480, 0x400, 0x1000 },
     { MACFB_DISPLAY_VGA, 24, 0x400, 0x6ff, 640, 480, 0x1000, 0x1000 },
+    { MACFB_DISPLAY_VGA, 1, 0xd0, 0x60e, 800, 600, 0x340, 0xe00 },
+    { MACFB_DISPLAY_VGA, 2, 0xd0, 0x606, 800, 600, 0x340, 0xe00 },
+    { MACFB_DISPLAY_VGA, 4, 0xd0, 0x602, 800, 600, 0x340, 0xe00 },
+    { MACFB_DISPLAY_VGA, 8, 0xd0, 0x600, 800, 600, 0x340, 0xe00 },
+    { MACFB_DISPLAY_VGA, 24, 0x340, 0x000, 800, 600, 0xd00, 0xe00 },
     { MACFB_DISPLAY_APPLE_12_RGB, 1, 0x100, 0x61e, 512, 384, 0x400, 0x1000 },
     { MACFB_DISPLAY_APPLE_12_RGB, 2, 0x100, 0x60e, 512, 384, 0x400, 0x1000 },
     { MACFB_DISPLAY_APPLE_12_RGB, 4, 0x100, 0x606, 512, 384, 0x400, 0x1000 },
@@ -322,7 +391,7 @@ static void macfb_draw_line16(MacfbState *s, uint8_t *d, uint32_t addr,
         g = ((pixel >> 5) & 0x1f) << 3;
         b = (pixel & 0x1f) << 3;
         addr += 2;
-        if (s->direct_clut) {
+        if (s->direct_clut && s->clut_16bpp) {
             /* Mac OS loads the gamma curve into entries 0, 8, 16 ... 255 */
             r = s->color_palette[(r | r >> 5) * 3];
             g = s->color_palette[(g | g >> 5) * 3 + 1];
@@ -996,6 +1065,7 @@ static const Property macfb_nubus_properties[] = {
                        MACFB_VRAM_WINDOW),
     DEFINE_PROP_UINT32("config-strap", MacfbNubusState, macfb.config_strap, 0),
     DEFINE_PROP_BOOL("direct-clut", MacfbNubusState, macfb.direct_clut, false),
+    DEFINE_PROP_BOOL("clut-16bpp", MacfbNubusState, macfb.clut_16bpp, true),
     DEFINE_PROP_BOOL("ramdac-indexed", MacfbNubusState, macfb.ramdac_indexed,
                      false),
     DEFINE_PROP_UINT32("width", MacfbNubusState, macfb.width, 640),

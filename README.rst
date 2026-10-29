@@ -37,7 +37,9 @@ What the branch adds
   NuBus video card, ``nubus-video``, with its own declaration ROM and
   driver. It sits in slot 9 by default. The Quadra 800 has its real 1 MB
   of video memory, so 832 x 624 offers thousands of colours, not millions.
-  In every depth the gamma table chosen in Monitors applies, as on the
+  The LC 475 offers thousands on its 12", 13" and 16" monitors. A VGA
+  monitor (``-g 640x480``) can be switched to 800 x 600 in Monitors'
+  Options on the LC 475 and the Quadras. In every depth the gamma table chosen in Monitors applies, as on the
   real machines.
 - **Floppies:** the original SWIM, the IWM mode for the Mac II family, and
   the IIfx/Quadra 900 SWIM IOP. Supported images are 400K and 800K (GCR)
