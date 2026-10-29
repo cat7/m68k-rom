@@ -20,7 +20,8 @@
  *   $FE000000  PDS slot $E
  *
  * V8 (LC, LC II) decodes only A31 and A0-A23, so its 16 MB repeat through
- * the lower 2 GB:
+ * the lower 2 GB; the PDS slot answers at $FE000000 (in 24-bit mode at
+ * $E00000, through the LC's HMMU or the LC II's PMMU tables):
  *
  *   $000000  RAM: a pair of 30-pin SIMMs (2, 4 or 8 MB) and the board's
  *            RAM (LC 2 MB, LC II 4 MB): 10 MB at most; see v8_map_ram
@@ -287,10 +288,18 @@ static const MemoryRegionOps maclc_scsi_ops = {
     },
 };
 
-/* The LC's HMMU: in 24-bit mode only A0-A23 reach V8 */
+/*
+ * The LC's HMMU in 24-bit mode: only A0-A23 count; $E00000-$EFFFFF is the
+ * PDS slot (the first MB of $FE000000), the rest goes to V8
+ */
 static hwaddr v8_hmmu_map24(void *opaque, vaddr addr)
 {
-    return addr & 0xffffff;
+    uint32_t a = addr & 0xffffff;
+
+    if ((a >> 20) == 0xe) {
+        return 0xfe000000 | (a & 0xfffff);
+    }
+    return a;
 }
 
 static void v8_set_hmmu_off(void *opaque, int n, int level)
@@ -814,8 +823,11 @@ static void maclc_machine_init(MachineState *machine)
     memory_region_add_subregion(&m->io, SWIM_OFFSET,
                                 sysbus_mmio_get_region(sysbus, 0));
 
-    /* the LC III's PDS slot, $E; its interrupt on the slot line 5 */
-    if (!model->v8) {
+    /*
+     * The PDS slot, $E, with its interrupt on the slot line 5. V8 answers
+     * only with A31 low, so the card sees everything at $80000000 and up.
+     */
+    {
         object_initialize_child(OBJECT(machine), "mac-nubus-bridge",
                                 &m->nubus_bridge, TYPE_MAC_NUBUS_BRIDGE);
         dev = DEVICE(&m->nubus_bridge);

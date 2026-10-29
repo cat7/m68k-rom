@@ -52,8 +52,9 @@ What the branch adds
   monitors (LC III also the 16" and VGA). The VRAM size
   (``-global mac-lc-video.vram-size``: 256 or 512 KB on the LC and LC II,
   512 or 768 KB on the LC III) sets the depths the ROM offers, as on the
-  real machines. The LC's 68020 gets Apple's 24-bit HMMU. The LC III's
-  PDS slot takes the LC 475's Ethernet card. An LC II with 10 MB (8 MB
+  real machines. The LC's 68020 gets Apple's 24-bit HMMU, which also
+  routes $E00000 to the PDS slot. The PDS slot of all three takes the
+  LC 475's Ethernet card. An LC II with 10 MB (8 MB
   of SIMMs) does not size its RAM right yet.
 - **Floppies:** the original SWIM, the IWM mode for the Mac II family, and
   the IIfx/Quadra 900 SWIM IOP. Supported images are 400K and 800K (GCR)
@@ -61,12 +62,14 @@ What the branch adds
   from the Mac. Choosing Two-Sided when formatting a 400K image grows it
   to 800K.
 - **Ethernet:** an Apple NuBus Ethernet card, ``nubus-ethernet``, for the
-  Mac II family, and the LC 475 PDS Ethernet card, ``mac-pds-ethernet``.
+  Mac II family, and the LC 475 PDS Ethernet card, ``mac-pds-ethernet``,
+  for the LCs. Open Transport needs a 68030, so on the LC (68020) the card
+  needs classic AppleTalk and MacTCP.
 - **Shared folder:** a host folder as a Mac disk, through the
   ``nubus-virtio-mmio`` card, ``virtio-9p-device`` and
   ``-fsdev local,...,macos_compat=on`` (file types and resource forks).
   The card's declaration ROM and drivers come from
-  https://github.com/cat7/classicvirtio. The LC 475 has only its PDS
+  https://github.com/cat7/classicvirtio. The LCs have only their PDS
   slot, so ``mac-pds-ethernet-virtio`` puts the Ethernet card and the
   virtio devices on one card (ROM: classicvirtio's ``declrom-pds``).
 - **Timing:** at start-up the ROMs time their delay loops against a VIA
