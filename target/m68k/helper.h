@@ -137,4 +137,5 @@ DEF_HELPER_1(pflush030, void, env)
 DEF_HELPER_4(pload030, void, env, i32, i32, i32)
 DEF_HELPER_4(ptest030, i32, env, i32, i32, i32)
 DEF_HELPER_FLAGS_1(reset, TCG_CALL_NO_RWG, void, env)
+DEF_HELPER_FLAGS_1(delay_loop, TCG_CALL_NO_RWG, void, env)
 #endif

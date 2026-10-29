@@ -661,6 +661,9 @@ static HumanReadableText *qmp_x_query_via(Error **errp)
                                 "\n",
                            gov.governed_ns / 1.0e6, gov.slept_ns / 1.0e6,
                            gov.insns, gov.irq_catch_ups);
+    g_string_append_printf(buf, "    delay loops: passes=%" PRIu64
+                                " slept=%.3f ms\n",
+                           gov.delay_insns, gov.delay_slept_ns / 1.0e6);
 
     return human_readable_text_from_str(buf);
 }

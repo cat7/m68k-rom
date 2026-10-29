@@ -177,6 +177,10 @@ sm501_disp_ctrl_write(uint32_t addr, uint32_t val) "addr=0x%x, val=0x%x"
 sm501_2d_engine_read(uint32_t addr, uint32_t val) "addr=0x%x, val=0x%x"
 sm501_2d_engine_write(uint32_t addr, uint32_t val) "addr=0x%x, val=0x%x"
 
+# mac_lc_video.c
+mac_lc_video_ctrl_read(uint64_t addr, uint64_t val) "reg %"PRIu64" -> 0x%02"PRIx64
+mac_lc_video_ctrl_write(uint64_t addr, uint64_t val) "reg %"PRIu64" <- 0x%02"PRIx64
+
 # macfb.c
 macfb_ctrl_read(uint64_t addr, uint64_t value, unsigned int size) "addr 0x%"PRIx64 " value 0x%"PRIx64 " size %u"
 macfb_ctrl_write(uint64_t addr, uint64_t value, unsigned int size) "addr 0x%"PRIx64 " value 0x%"PRIx64 " size %u"

@@ -56,6 +56,14 @@ config Q900
     select ORWELL
     select MAC_IOP
 
+config Q950
+    bool
+    default y
+    depends on M68K
+    select MAC_QUADRA
+    select ORWELL
+    select MAC_IOP
+
 config LC475
     bool
     default y
@@ -63,6 +71,20 @@ config LC475
     select MAC_QUADRA
     select DJMEMC
     select IOSB
+
+config MACLC
+    bool
+    default y
+    depends on M68K
+    select NCR5380
+    select MAC_VIA
+    select MAC_PSEUDOVIA
+    select MAC_LC_VIDEO
+    select NUBUS
+    select ESCC
+    select OR_IRQ
+    select ASC
+    select SWIM2
 
 config M68K_VIRT
     bool

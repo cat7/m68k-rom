@@ -144,6 +144,14 @@ typedef struct CPUArchState {
         uint64_t srp030;
         uint32_t tt030[2];
         uint16_t mmusr030;
+        /*
+         * The code page the 68030 was running from when the TC was last
+         * loaded: its instruction cache keeps supplying it (see
+         * m68030_tlb_fill)
+         */
+        bool icache_valid;
+        uint32_t icache_vpage;
+        uint32_t icache_ppage;
     } mmu;
 
     /* Control registers.  */

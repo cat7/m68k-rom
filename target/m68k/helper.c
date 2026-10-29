@@ -20,6 +20,9 @@
 
 #include "qemu/osdep.h"
 #include "cpu.h"
+#ifndef CONFIG_USER_ONLY
+#include "system/calib-governor.h"
+#endif
 #include "exec/cputlb.h"
 #include "exec/page-protection.h"
 #include "exec/target_page.h"
@@ -194,6 +197,11 @@ void HELPER(m68k_movec_to)(CPUM68KState *env, uint32_t reg, uint32_t val)
             env->cacr = val & 0x0000000f;
         } else if (m68k_feature(env, M68K_FEATURE_M68030)) {
             env->cacr = val & 0x00003f1f;
+            if ((val & 0x8) && env->mmu.icache_valid) {
+                /* CI: the instruction cache is cleared */
+                env->mmu.icache_valid = false;
+                tlb_flush_page(env_cpu(env), env->mmu.icache_vpage);
+            }
         } else if (m68k_feature(env, M68K_FEATURE_M68040)) {
             env->cacr = val & 0x80008000;
         } else if (m68k_feature(env, M68K_FEATURE_M68060)) {
@@ -1242,6 +1250,13 @@ static bool m68030_tlb_fill(CPUState *cs, vaddr address, int size,
 
     sr = m68030_walk(env, address, fetch ? pfc : dfc, write, 16, true, &w);
     if (!m68030_access_ok(sr, &w, super, write)) {
+        if (fetch && env->mmu.icache_valid &&
+            (address & TARGET_PAGE_MASK) == env->mmu.icache_vpage) {
+            /* still in the instruction cache: see m68030_note_code_page */
+            tlb_set_page(cs, env->mmu.icache_vpage, env->mmu.icache_ppage,
+                         PAGE_EXEC, mmu_idx, TARGET_PAGE_SIZE);
+            return true;
+        }
         if (probe) {
             return false;
         }
@@ -2032,6 +2047,39 @@ void HELPER(pflush)(CPUM68KState *env, uint32_t addr, uint32_t opmode)
 }
 
 /*
+ * The instruction cache is addressed logically, so the instructions after
+ * a TC load still come from the page they ran from before, as long as
+ * they are in the cache. The LC and LC II ROMs rely on it: they turn the
+ * MMU on while running at their 24-bit address, which the new tables do
+ * not map, and jump to their 32-bit address a few instructions later. So
+ * when, after a TC load that flushes the ATC, instruction fetches from
+ * that page find no translation, they get the old one, until the cache
+ * is cleared. Code that the new tables do map (the Mac II ROMs remap the
+ * page they run in) takes the new translation.
+ */
+static void m68030_note_code_page(CPUM68KState *env, uint32_t pc)
+{
+    M68kCPU *cpu = env_archcpu(env);
+    uint32_t vpage = pc & TARGET_PAGE_MASK;
+    M68030Walk w;
+
+    env->mmu.icache_valid = false;
+    if (!m68k_mmu_enabled(env)) {
+        env->mmu.icache_ppage = cpu->addr_map ?
+            cpu->addr_map(cpu->addr_map_opaque, vpage) : vpage;
+    } else {
+        uint16_t sr = m68030_walk(env, vpage, 6, false, 16, false, &w);
+
+        if (!m68030_access_ok(sr, &w, true, false)) {
+            return;
+        }
+        env->mmu.icache_ppage = w.physical & TARGET_PAGE_MASK;
+    }
+    env->mmu.icache_vpage = vpage;
+    env->mmu.icache_valid = true;
+}
+
+/*
  * 68030 PMOVE: @ext is the extension word, @addr the effective address.
  * Invalid encodings are rejected by the translator.
  */
@@ -2074,6 +2122,8 @@ void HELPER(pmove030)(CPUM68KState *env, uint32_t ext, uint32_t addr,
             }
             val = cpu_ldl_be_mmuidx_ra(env, addr, MMU_KERNEL_IDX, ra);
             if (!fd) {
+                /* with FD the ATC keeps the old translations anyway */
+                m68030_note_code_page(env, next_pc);
                 tlb_flush(cs);
             }
             if ((val & M68K_TC030_E) && !m68030_tc_valid(val)) {
@@ -2194,5 +2244,11 @@ void HELPER(reset)(CPUM68KState *env)
 {
     /* the board resets the devices on its reset line */
     qemu_irq_pulse(env_archcpu(env)->reset_out);
+}
+
+/* one pass of a `dbcc dN,self` delay loop */
+void HELPER(delay_loop)(CPUM68KState *env)
+{
+    calib_governor_delay_insn(env_cpu(env));
 }
 #endif /* !CONFIG_USER_ONLY */

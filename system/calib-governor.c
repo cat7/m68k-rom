@@ -42,6 +42,16 @@
  *    so a re-arm looks again). An epoch spoilt by the window's own setup
  *    code costs a re-sync, not the window.
  *
+ * 4. DELAY LOOPS. Mac OS also times `dbra dN,self` loops of TimeDBRA
+ *    iterations against a Time Manager task (System 7.5's speed check
+ *    runs four and divides by the microseconds they took). At host speed
+ *    they take no measurable time and the check divides by zero. Such a
+ *    loop is one instruction branching to itself, so it can only be a
+ *    delay: the translator calls calib_governor_delay_insn() on each pass
+ *    and, while a VIA T2 one-shot is pending, the loop runs at the paced
+ *    rate. Other code, and delay loops with no timer running, are not
+ *    touched.
+ *
  * Under icount the guest's clock follows its instruction count, so the
  * ROM already measures a deterministic value and pacing against the
  * host clock would only slow it down: the governor stands aside.
@@ -111,6 +121,10 @@ typedef struct CalibGovVCPU {
     uint64_t quantum_insn;
     uint64_t window_insn;
     int64_t window_start_ns;
+    /* delay-loop pacing */
+    uint64_t delay_insn;
+    int64_t delay_start_ns;
+    int64_t delay_last_ns;
 } CalibGovVCPU;
 
 static CalibGovVCPU gov_vcpu[CALIB_GOV_MAX_CPUS];
@@ -126,6 +140,7 @@ static uint64_t gov_insn_per_quantum = MAX_QUANTUM_INSNS;
 static void (*gov_irq_cb)(void *opaque);
 static void *gov_irq_opaque;
 static int64_t gov_irq_due_ns;          /* host monotonic, one-shot expiry */
+static int64_t gov_oneshot_due_ns;      /* host monotonic, any T2 one-shot */
 static bool gov_irq_delivered;
 
 /* Window state, written with the BQL held. */
@@ -326,6 +341,10 @@ bool calib_governor_arm(int64_t countdown_ns,
     if (!calib_governor_enabled()) {
         return false;
     }
+    /* any one-shot up to a second paces delay loops while it runs */
+    if (countdown_ns > 0 && countdown_ns <= NSEC_IN_ONE_SEC) {
+        qatomic_set(&gov_oneshot_due_ns, now_ns() + countdown_ns);
+    }
     /* Also disposes of the INT64_MAX a stopped timer produces. */
     if (countdown_ns > CALIB_GOV_MAX_ARM_NS ||
         countdown_ns < CALIB_GOV_MIN_ARM_NS) {
@@ -518,6 +537,52 @@ void calib_governor_account(CPUState *cpu, uint64_t pc, unsigned int n_insns)
     }
 }
 
+/* checked every so many passes, so the clock is read rarely */
+#define CALIB_GOV_DELAY_CHECK   64
+/* a pause longer than this starts a new loop */
+#define CALIB_GOV_DELAY_GAP_NS  (1000 * 1000)
+
+void calib_governor_delay_insn(CPUState *cpu)
+{
+    CalibGovVCPU *v;
+    int64_t now, due_ns, elapsed_ns;
+    unsigned index = cpu->cpu_index;
+
+    if (!gov_enabled || unlikely(index >= CALIB_GOV_MAX_CPUS)) {
+        return;
+    }
+    v = &gov_vcpu[index];
+    if (++v->delay_insn % CALIB_GOV_DELAY_CHECK) {
+        return;
+    }
+    if (icount_enabled()) {
+        return;
+    }
+    now = now_ns();
+    if (now >= qatomic_read(&gov_oneshot_due_ns)) {
+        v->delay_last_ns = 0;
+        return;
+    }
+    if (now - v->delay_last_ns > CALIB_GOV_DELAY_GAP_NS) {
+        v->delay_start_ns = now;
+        v->delay_insn = 0;
+    }
+    qatomic_add(&gov_stats.delay_insns, CALIB_GOV_DELAY_CHECK);
+
+    due_ns = (int64_t)((double)v->delay_insn / (double)gov_insn_per_second *
+                       (double)NSEC_IN_ONE_SEC);
+    elapsed_ns = now - v->delay_start_ns;
+    if (due_ns > elapsed_ns) {
+        int64_t after;
+
+        throttle_sleep(due_ns - elapsed_ns);
+        after = now_ns();
+        qatomic_add(&gov_stats.delay_slept_ns, (uint64_t)(after - now));
+        now = after;
+    }
+    v->delay_last_ns = now;
+}
+
 void calib_governor_get_stats(CalibGovStats *out)
 {
     out->windows = qatomic_read(&gov_stats.windows);
@@ -530,6 +595,8 @@ void calib_governor_get_stats(CalibGovStats *out)
     out->insns = qatomic_read(&gov_stats.insns);
     out->slept_ns = qatomic_read(&gov_stats.slept_ns);
     out->irq_catch_ups = qatomic_read(&gov_stats.irq_catch_ups);
+    out->delay_insns = qatomic_read(&gov_stats.delay_insns);
+    out->delay_slept_ns = qatomic_read(&gov_stats.delay_slept_ns);
 }
 
 static void calib_governor_set_mips(uint64_t mips)

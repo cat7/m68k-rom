@@ -47,6 +47,13 @@ bool calib_governor_arm(int64_t countdown_ns,
 void calib_governor_account(CPUState *cpu, uint64_t pc, unsigned int n_insns);
 
 /*
+ * Accelerator side. Called on each pass of a delay loop: an instruction
+ * that branches to itself (`dbra dN,self`). While a VIA T2 one-shot is
+ * pending it paces the loop; see system/calib-governor.c.
+ */
+void calib_governor_delay_insn(CPUState *cpu);
+
+/*
  * True when the governor, rather than a fixed-value workaround, is in
  * charge of the calibration. Under icount the guest's clock follows its
  * instruction count, so the ROM measures a deterministic value itself
@@ -79,6 +86,8 @@ typedef struct CalibGovStats {
     uint64_t insns;         /* guest instructions executed inside windows */
     uint64_t slept_ns;      /* real time spent waiting to enforce the rate */
     uint64_t irq_catch_ups; /* overdue one-shot IRQs delivered inline */
+    uint64_t delay_insns;   /* delay-loop passes paced */
+    uint64_t delay_slept_ns; /* real time spent pacing delay loops */
 } CalibGovStats;
 
 void calib_governor_get_stats(CalibGovStats *out);

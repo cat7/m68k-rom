@@ -367,6 +367,10 @@ bcm2838_rng200_fifo_full(void) "RNumG FIFO full"
 bcm2838_rng200_write(uint64_t addr, uint64_t value, unsigned size) "addr: 0x%"PRIx64" value: 0x%016" PRIx64 " size: %u"
 bcm2838_rng200_read(uint64_t addr, unsigned size, uint64_t value) "addr: 0x%"PRIx64" size: %u value: 0x%016" PRIx64
 
+# mac_pseudovia.c
+mac_pseudovia_read(uint64_t reg, uint8_t val) "reg 0x%02"PRIx64" -> 0x%02x"
+mac_pseudovia_write(uint64_t reg, uint8_t val) "reg 0x%02"PRIx64" <- 0x%02x"
+
 # mac_via.c
 via1_rtc_update_data_out(int count, int value) "count=%d value=0x%02x"
 via1_rtc_update_data_in(int count, int value) "count=%d value=0x%02x"

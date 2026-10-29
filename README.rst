@@ -2,7 +2,7 @@
 More 68k Macs for qemu-system-m68k (q700)
 ==========================================
 
-This ``q700`` branch is a personal fork of QEMU. It adds seven 68k
+This ``q700`` branch is a personal fork of QEMU. It adds eleven 68k
 Macintosh models to ``qemu-system-m68k``, next to the Quadra 800 that QEMU
 already has. It is an experiment and is not meant for upstream QEMU.
 
@@ -18,6 +18,10 @@ Machine       Model                   CPU        ROM
 ``maciifx``   Macintosh IIfx          68030      IIfx ROM
 ``q700``      Macintosh Quadra 700    68040      Quadra 700/900 ROM
 ``q900``      Macintosh Quadra 900    68040      Quadra 700/900 ROM
+``q950``      Macintosh Quadra 950    68040      Quadra 950 ROM
+``maclc``     Macintosh LC            68020      LC ROM
+``maclc2``    Macintosh LC II         68030      LC II ROM
+``maclc3``    Macintosh LC III        68030      LC III ROM
 ``lc475``     Macintosh LC 475        68LC040    LC 475 ROM
 ``q800``      Macintosh Quadra 800    68040      Quadra 800 ROM (upstream)
 ============  ======================  =========  ==============================
@@ -41,6 +45,16 @@ What the branch adds
   monitor (``-g 640x480``) can be switched to 800 x 600 in Monitors'
   Options on the LC 475 and the Quadras. In every depth the gamma table chosen in Monitors applies, as on the
   real machines.
+- **LC, LC II, LC III:** Apple's V8 and Sonora chips: their memory
+  controllers (the LCs take only the RAM sizes their soldered RAM and
+  SIMMs make: LC 2-10 MB, LC II 4-8 MB, LC III 4-36 MB), the pseudo-VIA,
+  and the built-in video with its Ariel DAC on the 12", 13" and 15"
+  monitors (LC III also the 16" and VGA). The VRAM size
+  (``-global mac-lc-video.vram-size``: 256 or 512 KB on the LC and LC II,
+  512 or 768 KB on the LC III) sets the depths the ROM offers, as on the
+  real machines. The LC's 68020 gets Apple's 24-bit HMMU. The LC III's
+  PDS slot takes the LC 475's Ethernet card. An LC II with 10 MB (8 MB
+  of SIMMs) does not size its RAM right yet.
 - **Floppies:** the original SWIM, the IWM mode for the Mac II family, and
   the IIfx/Quadra 900 SWIM IOP. Supported images are 400K and 800K (GCR)
   and 720K and 1.44 MB (MFM). They can be read, written and formatted
@@ -61,7 +75,10 @@ What the branch adds
   G3 branch, slows the CPU to the model's real speed for just those few
   milliseconds, so every model measures period-correct values itself.
   It is the machine property ``calibration-governor=on|off|mips=N``;
-  with ``-icount`` the ROM's own measurement is used.
+  with ``-icount`` the ROM's own measurement is used. The same pacing
+  applies to ``dbra dN,*`` delay loops while a Time Manager task runs,
+  which Mac OS also times (System 7.5's speed check on the LC III and
+  the A/UX disk's Mac OS otherwise divide by zero).
 - **Other:** the Egret, Cuda and OSS chips, and the IOP for ADB.
 
 Using it

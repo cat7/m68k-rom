@@ -1454,6 +1454,12 @@ DISAS_INSN(dbcc)
     reg = DREG(insn, 0);
     base = s->pc;
     offset = (int16_t)read_im16(env, s);
+#ifndef CONFIG_USER_ONLY
+    if (base + offset == s->base.pc_next) {
+        /* `dbcc dN,self`: a delay loop, which the governor may pace */
+        gen_helper_delay_loop(tcg_env);
+    }
+#endif
     l1 = gen_new_label();
     gen_jmpcc(s, (insn >> 8) & 0xf, l1);
 
