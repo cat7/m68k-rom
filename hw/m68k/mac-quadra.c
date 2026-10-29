@@ -55,6 +55,7 @@
 #include "system/qtest.h"
 #include "system/runstate.h"
 #include "system/reset.h"
+#include "system/calib-governor.h"
 #include "migration/vmstate.h"
 
 #define MACROM_ADDR     0x40800000
@@ -364,6 +365,8 @@ static void q800_machine_init(MachineState *machine)
     NubusBus *nubus;
     DriveInfo *dinfo;
     uint8_t rng_seed[32];
+
+    calib_governor_default_on(model->calib_mips);
 
     linux_boot = (kernel_filename != NULL);
 
@@ -937,6 +940,7 @@ static void mac_quadra_machine_class_init(ObjectClass *oc, const void *data)
     mc->default_ram_id = "m68k_mac.ram";
     machine_add_audiodev_property(mc);
 
+    calib_governor_add_machine_property(oc);
     object_class_property_add_bool(oc, "easc", q800_get_easc, q800_set_easc);
     object_class_property_set_description(oc, "easc",
         "Set to off to use ASC rather than EASC");

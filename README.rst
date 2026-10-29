@@ -55,6 +55,13 @@ What the branch adds
   https://github.com/cat7/classicvirtio. The LC 475 has only its PDS
   slot, so ``mac-pds-ethernet-virtio`` puts the Ethernet card and the
   virtio devices on one card (ROM: classicvirtio's ``declrom-pds``).
+- **Timing:** at start-up the ROMs time their delay loops against a VIA
+  timer, and at full TCG speed the count overflows to 0 (a divide-by-zero
+  Sad Mac or system error later). A calibration governor, ported from the
+  G3 branch, slows the CPU to the model's real speed for just those few
+  milliseconds, so every model measures period-correct values itself.
+  It is the machine property ``calibration-governor=on|off|mips=N``;
+  with ``-icount`` the ROM's own measurement is used.
 - **Other:** the Egret, Cuda and OSS chips, and the IOP for ADB.
 
 Using it

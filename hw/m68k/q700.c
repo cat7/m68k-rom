@@ -21,6 +21,7 @@
 
 static const MacQuadraModel q700_model = {
     .desc = "Macintosh Quadra 700",
+    .calib_mips = 7,
     .rom_filename = "Quadra700.rom",
     .bootinfo_model = MAC_MODEL_Q700,
     .via1_cpuid = VIA1A_CPUID3,

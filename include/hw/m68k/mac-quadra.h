@@ -97,6 +97,7 @@ typedef struct MacQuadraModel {
      * never loads the CLUT for thousands of colours
      */
     bool thousands_unmapped;
+    uint32_t calib_mips;            /* calibration-governor pacing rate */
 } MacQuadraModel;
 
 struct MacQuadraMachineClass {

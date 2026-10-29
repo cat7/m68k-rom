@@ -16,6 +16,7 @@
 
 static const MacQuadraModel q800_model = {
     .desc = "Macintosh Quadra 800",
+    .calib_mips = 10,
     .rom_filename = "MacROM.bin",
     .bootinfo_model = MAC_MODEL_Q800,
     .via1_cpuid = VIA1A_CPUID_Q800,

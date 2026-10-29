@@ -1008,6 +1008,16 @@ cpu_exec_loop(CPUState *cpu, SyncClocks *sc)
 
             cpu_loop_exec_tb(cpu, tb, s.pc, &last_tb, &tb_exit);
 
+#ifndef CONFIG_USER_ONLY
+            /*
+             * Pace the guest while a calibration window is open. Its
+             * cflags suppress chaining, so exactly one block ran above.
+             */
+            if (calib_governor_active()) {
+                calib_governor_account(cpu, s.pc, tb->icount);
+            }
+#endif
+
             /* Try to align the host and virtual clocks
                if the guest is in advance */
             align_clocks(sc, cpu);

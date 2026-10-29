@@ -49,6 +49,7 @@
 #include "hw/nubus/nubus-video.h"
 #include "target/m68k/cpu.h"
 #include "qom/object.h"
+#include "system/calib-governor.h"
 
 #define MACII_ROM_ADDR      0x40000000
 #define MACII_ROM_SIZE      (256 * KiB)
@@ -91,6 +92,7 @@ typedef struct MacIIModel {
     bool amu;                   /* 24-bit mapping by the AMU (68020) */
     uint16_t slots;             /* NuBus slot mask */
     uint32_t max_ram_mb;
+    uint32_t calib_mips;        /* calibration-governor pacing rate */
 } MacIIModel;
 
 #define TYPE_MACII_MACHINE MACHINE_TYPE_NAME("macii")
@@ -370,6 +372,8 @@ static void macii_machine_init(MachineState *machine)
     char *filename;
     int i, size;
 
+    calib_governor_default_on(model->calib_mips);
+
     m->model = model;
     if (macii_ram_code_for(machine->ram_size, &two_banks) < 0 ||
         machine->ram_size > model->max_ram_mb * MiB) {
@@ -600,18 +604,21 @@ static const MacIIModel macii_model = {
     .desc = "Macintosh II", .cpu = M68K_CPU_TYPE_NAME("m68020"),
     .via1_pa6 = 0, .via2_pb3 = 1, .amu = true, .slots = 0x7e00,
     .max_ram_mb = 8,
+    .calib_mips = 3,
 };
 
 static const MacIIModel maciix_model = {
     .desc = "Macintosh IIx", .cpu = M68K_CPU_TYPE_NAME("m68030"),
     .via1_pa6 = 0, .via2_pb3 = 0, .amu = false, .slots = 0x7e00,
     .max_ram_mb = 128,
+    .calib_mips = 3,
 };
 
 static const MacIIModel maciicx_model = {
     .desc = "Macintosh IIcx", .cpu = M68K_CPU_TYPE_NAME("m68030"),
     .via1_pa6 = 1, .via2_pb3 = 1, .amu = false, .slots = 0x0e00,
     .max_ram_mb = 128,
+    .calib_mips = 3,
 };
 
 static void macii_machine_class_init(ObjectClass *oc, const void *data)
@@ -640,6 +647,7 @@ static void macii_machine_class_init(ObjectClass *oc, const void *data)
     mc->default_ram_id = "macii.ram";
     mc->default_ram_size = 8 * MiB;
     machine_add_audiodev_property(mc);
+    calib_governor_add_machine_property(oc);
 }
 
 static const TypeInfo macii_machine_types[] = {

@@ -25,6 +25,7 @@
 
 static const MacQuadraModel lc475_model = {
     .desc = "Macintosh LC 475",
+    .calib_mips = 7,
     .rom_filename = "LC475.rom",
     .bootinfo_model = MAC_MODEL_P475,
     .via1_cpuid = VIA1A_CPUID_Q800,

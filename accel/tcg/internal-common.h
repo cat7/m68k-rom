@@ -13,6 +13,9 @@
 #include "exec/translation-block.h"
 #include "exec/mmap-lock.h"
 #include "accel/tcg/tb-cpu-state.h"
+#ifndef CONFIG_USER_ONLY
+#include "system/calib-governor.h"
+#endif
 
 extern int64_t max_delay;
 extern int64_t max_advance;
@@ -76,6 +79,16 @@ void tcg_exec_unrealizefn(CPUState *cpu);
  */
 static inline uint32_t curr_cflags(CPUState *cpu)
 {
+#ifndef CONFIG_USER_ONLY
+    /*
+     * While a calibration window is open, stop chaining so that every
+     * block returns to cpu_exec_loop() and can be paced; NO_GOTO_TB alone
+     * still chains through the jump cache. See system/calib-governor.c.
+     */
+    if (calib_governor_active()) {
+        return cpu->tcg_cflags | CF_NO_GOTO_TB | CF_NO_GOTO_PTR;
+    }
+#endif
     return cpu->tcg_cflags;
 }
 

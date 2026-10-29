@@ -36,6 +36,7 @@
 #include "qemu/cutils.h"
 #include "qemu/log.h"
 #include "qemu/module.h"
+#include "system/calib-governor.h"
 #include "trace.h"
 
 
@@ -290,6 +291,28 @@ static void mos6522_timer2(void *opaque)
     mos6522_update_irq(s);
 }
 
+/*
+ * Deliver an overdue T2 one-shot interrupt inline. Called (BQL held) by
+ * the calibration governor from the paced vCPU once the expiry has passed
+ * on the host clock: the ROM's calibration spin touches no register, so
+ * nothing else would deliver it before the main loop runs the timer, and
+ * the spin would run on at host speed. Never early, and never twice.
+ */
+static void mos6522_t2_irq_catch_up(void *opaque)
+{
+    MOS6522State *s = opaque;
+    int64_t now = qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL);
+
+    if (now < s->timers[1].next_irq_time) {
+        return;
+    }
+    trace_mos6522_t2_irq_catch_up(now - s->timers[1].next_irq_time);
+    s->timers[1].next_irq_time = INT64_MAX;
+    timer_del(s->timers[1].timer);
+    s->ifr |= T2_INT;
+    mos6522_update_irq(s);
+}
+
 static uint64_t mos6522_get_counter_value(MOS6522State *s, MOS6522Timer *ti)
 {
     return muldiv64(qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL) - ti->load_time,
@@ -486,6 +509,18 @@ void mos6522_write(void *opaque, hwaddr addr, uint64_t val, unsigned size)
         s->timers[1].latch = (s->timers[1].latch & 0xff) | (val << 8);
         s->ifr &= ~T2_INT;
         set_counter(s, &s->timers[1], s->timers[1].latch);
+        /*
+         * A one-shot is how Mac ROMs time their CPU-speed calibration
+         * spins: let the calibration governor pace the vCPU while it runs.
+         */
+        if (!(s->acr & T2MODE_COUNT)) {
+            int64_t countdown = s->timers[1].next_irq_time -
+                                qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL);
+            bool governed = calib_governor_arm(countdown,
+                                               mos6522_t2_irq_catch_up, s);
+
+            trace_mos6522_t2_oneshot(s->timers[1].latch, countdown, governed);
+        }
         break;
     case VIA_REG_SR:
         s->sr = val;
@@ -607,8 +642,25 @@ static HumanReadableText *qmp_x_query_via(Error **errp)
 {
     g_autoptr(GString) buf = g_string_new("");
 
+    g_autofree char *govcfg = calib_governor_get_config();
+    CalibGovStats gov;
+
     object_child_foreach_recursive(object_get_root(),
                                    qmp_x_query_via_foreach, buf);
+
+    calib_governor_get_stats(&gov);
+    g_string_append_printf(buf, "calibration-governor (%s%s):\n", govcfg,
+                           calib_governor_enabled() ? "" : ", inactive");
+    g_string_append_printf(buf, "    windows=%" PRIu64 " re-arms=%" PRIu64
+                                " capped=%" PRIu64 " ignored=%" PRIu64
+                                " ungoverned=%" PRIu64 " probes=%" PRIu64 "\n",
+                           gov.windows, gov.rearms, gov.capped, gov.ignored,
+                           gov.ungoverned, gov.probes);
+    g_string_append_printf(buf, "    governed=%.3f ms slept=%.3f ms"
+                                " insns=%" PRIu64 " irq-catch-ups=%" PRIu64
+                                "\n",
+                           gov.governed_ns / 1.0e6, gov.slept_ns / 1.0e6,
+                           gov.insns, gov.irq_catch_ups);
 
     return human_readable_text_from_str(buf);
 }

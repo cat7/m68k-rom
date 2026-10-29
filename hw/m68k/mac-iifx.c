@@ -39,6 +39,10 @@
 #include "hw/nubus/nubus-video.h"
 #include "target/m68k/cpu.h"
 #include "qom/object.h"
+#include "system/calib-governor.h"
+
+/* calibration-governor pacing rate */
+#define IIFX_CALIB_MIPS 6
 
 #define IIFX_ROM_ADDR       0x40000000
 #define IIFX_ROM_SIZE       (512 * KiB)
@@ -423,6 +427,8 @@ static void iifx_machine_init(MachineState *machine)
     char *filename;
     int i, size;
 
+    calib_governor_default_on(IIFX_CALIB_MIPS);
+
     /* bank A: the biggest power of two up to 64 MB, bank B the rest */
     m->bank_a_size = MIN(pow2floor(ram_size), 64 * MiB);
     m->bank_b_size = ram_size - m->bank_a_size;
@@ -648,6 +654,7 @@ static void iifx_machine_class_init(ObjectClass *oc, const void *data)
     mc->default_ram_id = "maciifx.ram";
     mc->default_ram_size = 32 * MiB;
     machine_add_audiodev_property(mc);
+    calib_governor_add_machine_property(oc);
 }
 
 static const TypeInfo iifx_machine_types[] = {

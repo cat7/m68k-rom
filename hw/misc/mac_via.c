@@ -32,6 +32,8 @@
 #include "hw/core/qdev-properties-system.h"
 #include "system/block-backend.h"
 #include "system/rtc.h"
+#include "system/calib-governor.h"
+#include "exec/icount.h"
 #include "trace.h"
 #include "qemu/log.h"
 
@@ -935,6 +937,17 @@ static bool via1_is_toolbox_timer_calibrated(MOS6522Q800VIA1State *v1s)
             timesccdb == MACOS_TIMESCCB_VALUE);
 }
 
+/*
+ * The fixed values are only the fallback now. With the calibration
+ * governor the ROM's own spin is paced to a plausible speed, and under
+ * icount the guest clock follows the instruction count: either way the
+ * ROM measures sensible values itself.
+ */
+static bool via1_toolbox_hack_wanted(void)
+{
+    return !calib_governor_enabled() && !icount_enabled();
+}
+
 static void via1_timer_calibration_hack(MOS6522Q800VIA1State *v1s, int addr,
                                         uint64_t val, int size)
 {
@@ -989,10 +1002,12 @@ static void via1_timer_calibration_hack(MOS6522Q800VIA1State *v1s, int addr,
              * Update them with values obtained from a real Q800 but with
              * a x3 scaling factor which seems to work well
              */
-            stw_be_phys(&address_space_memory, MACOS_TIMEDBRA,
-                        MACOS_TIMEDBRA_VALUE);
-            stw_be_phys(&address_space_memory, MACOS_TIMESCCB,
-                        MACOS_TIMESCCB_VALUE);
+            if (via1_toolbox_hack_wanted()) {
+                stw_be_phys(&address_space_memory, MACOS_TIMEDBRA,
+                            MACOS_TIMEDBRA_VALUE);
+                stw_be_phys(&address_space_memory, MACOS_TIMESCCB,
+                            MACOS_TIMESCCB_VALUE);
+            }
 
             v1s->timer_hack_state = 4;
             v1s->timer_hack_rearmed = false;
