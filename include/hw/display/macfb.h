@@ -76,6 +76,7 @@ typedef struct MacfbState {
     bool clut_16bpp;              /* ... in 16 bpp too (else straight) */
     bool ramdac_indexed;          /* 0x220 is an indexed register file:
                                      the RAMDAC with 16 bpp */
+    uint32_t ramdac_ctrl;         /* 0x220 when not indexed */
     uint8_t ramdac_index;
     uint8_t ramdac_regs[256];
     const MacFbMode *mode;

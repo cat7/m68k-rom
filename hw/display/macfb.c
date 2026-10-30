@@ -745,7 +745,7 @@ static uint64_t macfb_ctrl_read(void *opaque,
         if (s->ramdac_indexed) {
             val = s->ramdac_regs[s->ramdac_index];
         } else {
-            val = s->regs[addr >> 2];
+            val = s->ramdac_ctrl;
         }
         break;
     case DAFB_LUT ... DAFB_LUT + 3:
@@ -825,7 +825,7 @@ static void macfb_ctrl_write(void *opaque,
         s->ramdac_index = val & 0xff;
         break;
     case DAFB_RAMDAC_CTRL:
-        s->regs[addr >> 2] = val;
+        s->ramdac_ctrl = val;
         s->ramdac_regs[s->ramdac_index] = val;
         break;
     case DAFB_LUT ... DAFB_LUT + 3:
