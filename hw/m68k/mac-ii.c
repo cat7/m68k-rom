@@ -183,6 +183,7 @@ static int macii_ram_code_for(uint64_t size, bool *two_banks)
 {
     int code;
 
+    *two_banks = false;
     for (code = 0; code < 4; code++) {
         if (size == macii_bank_size(code) || size == 2 * macii_bank_size(code)) {
             *two_banks = size == 2 * macii_bank_size(code);
