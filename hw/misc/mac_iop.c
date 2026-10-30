@@ -227,18 +227,18 @@ static void mac_iop_adb_poll(void *opaque)
 #define IOP_FD_CHAN             1
 
 enum {
-    FD_INIT = 1,
-    FD_SHUTDOWN,
-    FD_START_POLL,
-    FD_STOP_POLL,
-    FD_SET_TAG_ADDR,
-    FD_STATUS,
-    FD_EJECT,
-    FD_FORMAT,
-    FD_FORMAT_VERIFY,
-    FD_WRITE,
-    FD_READ,
-    FD_READ_VERIFY,
+    FD_CMD_INIT = 1,
+    FD_CMD_SHUTDOWN,
+    FD_CMD_START_POLL,
+    FD_CMD_STOP_POLL,
+    FD_CMD_SET_TAG_ADDR,
+    FD_CMD_STATUS,
+    FD_CMD_EJECT,
+    FD_CMD_FORMAT,
+    FD_CMD_FORMAT_VERIFY,
+    FD_CMD_WRITE,
+    FD_CMD_READ,
+    FD_CMD_READ_VERIFY,
 };
 
 /* the IOP's insert message */
@@ -364,13 +364,13 @@ static int mac_iop_fd_rw(MacIOPState *s, int i, uint8_t *msg, int kind)
     if (block > blocks || count > blocks - block) {
         return OS_PARAMERR;
     }
-    if (kind == FD_WRITE && !blk_is_writable(s->fd_blk[i])) {
+    if (kind == FD_CMD_WRITE && !blk_is_writable(s->fd_blk[i])) {
         return OS_WPRERR;
     }
     for (n = 0; n < count; n++, host += 512) {
         int64_t off = (int64_t)(block + n) * 512;
 
-        if (kind == FD_WRITE) {
+        if (kind == FD_CMD_WRITE) {
             address_space_read(&address_space_memory, host,
                                MEMTXATTRS_UNSPECIFIED, data, 512);
             if (blk_pwrite(s->fd_blk[i], off, 512, data, 0) < 0) {
@@ -381,7 +381,7 @@ static int mac_iop_fd_rw(MacIOPState *s, int i, uint8_t *msg, int kind)
         if (blk_pread(s->fd_blk[i], off, 512, data, 0) < 0) {
             return OS_IOERR;
         }
-        if (kind == FD_READ) {
+        if (kind == FD_CMD_READ) {
             address_space_write(&address_space_memory, host,
                                 MEMTXATTRS_UNSPECIFIED, data, 512);
         } else {
@@ -506,7 +506,7 @@ static void mac_iop_fd_send(MacIOPState *s, uint8_t *msg)
     int err = OS_NOERR;
 
     switch (kind) {
-    case FD_INIT:
+    case FD_CMD_INIT:
         /* drive kinds of drives 0-4: an internal SuperDrive, maybe two */
         memset(msg + 4, 0, 5);
         for (i = 0; i < MAC_IOP_NUM_FD; i++) {
@@ -515,23 +515,23 @@ static void mac_iop_fd_send(MacIOPState *s, uint8_t *msg)
             }
         }
         break;
-    case FD_START_POLL:
+    case FD_CMD_START_POLL:
         s->fd_polling = true;
         for (i = 0; i < MAC_IOP_NUM_FD; i++) {
             mac_iop_fd_report_insert(s, i);
         }
         break;
-    case FD_STOP_POLL:
-    case FD_SHUTDOWN:
+    case FD_CMD_STOP_POLL:
+    case FD_CMD_SHUTDOWN:
         s->fd_polling = false;
         break;
-    case FD_STATUS:
-    case FD_EJECT:
+    case FD_CMD_STATUS:
+    case FD_CMD_EJECT:
         if (i < 0) {
             err = OS_NSDRVERR;
             break;
         }
-        if (kind == FD_EJECT) {
+        if (kind == FD_CMD_EJECT) {
             if (!mac_iop_fd_has_disk(s, i)) {
                 err = OS_OFFLINERR;
             }
@@ -539,16 +539,16 @@ static void mac_iop_fd_send(MacIOPState *s, uint8_t *msg)
         }
         mac_iop_fd_status(s, i, msg);
         break;
-    case FD_FORMAT:
-    case FD_FORMAT_VERIFY:
-    case FD_WRITE:
-    case FD_READ:
-    case FD_READ_VERIFY:
+    case FD_CMD_FORMAT:
+    case FD_CMD_FORMAT_VERIFY:
+    case FD_CMD_WRITE:
+    case FD_CMD_READ:
+    case FD_CMD_READ_VERIFY:
         if (i < 0) {
             err = OS_NSDRVERR;
-        } else if (kind == FD_FORMAT) {
+        } else if (kind == FD_CMD_FORMAT) {
             err = mac_iop_fd_format_disk(s, i, msg[4] << 8 | msg[5]);
-        } else if (kind == FD_FORMAT_VERIFY) {
+        } else if (kind == FD_CMD_FORMAT_VERIFY) {
             err = mac_iop_fd_blocks(s, i) ? OS_NOERR : OS_OFFLINERR;
         } else {
             err = mac_iop_fd_rw(s, i, msg, kind);
