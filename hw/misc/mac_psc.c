@@ -524,17 +524,32 @@ static void psc_dsp_run(void *opaque)
                              NANOSECONDS_PER_SECOND);
     int64_t i;
     int st;
+    bool behind = false;
 
-    s->dsp_last_ns = now;
     if (!s->dsp_running || s->dsp_dead) {
+        s->dsp_last_ns = now;
         return;
     }
-    steps = MIN(steps, DSP_MAX_STEPS);
+    /*
+     * A late timer leaves more to do than one go may take: the rest is
+     * owed, and done in the next goes, so the DSP keeps up with the
+     * sound frames.
+     */
+    if (steps > DSP_MAX_STEPS) {
+        steps = DSP_MAX_STEPS;
+        s->dsp_last_ns += muldiv64(steps, NANOSECONDS_PER_SECOND,
+                                   s->dsp_hz / 4);
+        behind = true;
+    } else {
+        s->dsp_last_ns = now;
+    }
     for (i = 0; i < steps; i++) {
         st = dsp3210_step(s->dsp);
         if (!(s->dsp_tcon & 1)) {
             if (st == DSP3210_STEP_WAITI) {
-                break;              /* asleep, nothing to count */
+                s->dsp_last_ns = now;   /* asleep: nothing is owed */
+                behind = false;
+                break;
             }
         } else {
             /* per slot: the kernel times short stretches of its code */
@@ -554,7 +569,7 @@ static void psc_dsp_run(void *opaque)
     /* the 68040's polling loops wait at real speed while it works */
     calib_governor_set_coproc_busy(!s->dsp->waiting ||
                                    now - s->dsp_start_ns < DSP_BOOT_NS);
-    timer_mod(s->dsp_timer, now + DSP_SLICE_NS);
+    timer_mod(s->dsp_timer, behind ? now : now + DSP_SLICE_NS);
 }
 
 /* DSPRESET held or released */
@@ -587,8 +602,11 @@ static void psc_dsp_frame(MacPSCState *s)
     if (!s->dsp_running || s->dsp_dead) {
         return;
     }
+    /* the DSP's time up to this frame first: its timer may be late */
+    psc_dsp_run(s);
     trace_mac_psc_dsp_frame(s->dsp->pending);
     if (s->dsp->pending & (1u << DSP3210_VEC_EXT1)) {
+        trace_mac_psc_dsp_overrun(s->dsp->cur_insn);
         s->dsp_overrun |= OVRN_FRMOVRN;
         s->lvl_src[2] |= LV5_FRMOVRN;
         psc_update_ipl(s);

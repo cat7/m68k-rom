@@ -375,6 +375,7 @@ mac_psc_reg_write(uint64_t addr, unsigned size, uint64_t val) "+0x%04"PRIx64" (%
 mac_psc_dsp_reset(bool hold) "DSP %d"
 mac_psc_dsp_slice(int64_t steps, uint32_t pc, int waiting, uint16_t pending, uint16_t emr) "%"PRId64" steps, pc 0x%08x waiting %d pending 0x%04x emr 0x%04x"
 mac_psc_dsp_frame(uint16_t pending) "frame, pending 0x%04x"
+mac_psc_dsp_overrun(uint32_t pc) "frame overrun, DSP at 0x%08x"
 mac_psc_dsp_berr(uint32_t addr) "DSP bus error at 0x%08x"
 mac_psc_dsp_mmio_write(uint32_t off, uint32_t val, int size) "DSP MMIO +0x%04x <- 0x%x (%d)"
 
