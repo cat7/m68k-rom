@@ -4,9 +4,10 @@
  *
  * Civic's registers ($50036000) are one bit per longword: a register of n
  * bits at offset o has bit i at o + 4 * i. The timing registers give the
- * picture size (HAL/HFP in units of 2 pixels, VAL/VFP in half lines),
- * RowWords and BaseAddr the frame buffer's row length and start in units of
- * 32 bytes. VRAM is at $50100000 (1 MB, 2 MB with the VRAM upgrade).
+ * picture size (HAL/HFP in units of 2 pixels, VAL/VFP in half lines; in
+ * lines of a field with ScanCtl set, for the interlaced TV modes),
+ * RowWords and BaseAddr the frame buffer's row length (two rows when
+ * interlaced) and start in units of 32 bytes. VRAM is at $50100000 (1 MB, 2 MB with the VRAM upgrade).
  *
  * Sebastian ($50F30800): +$00 CLUT address, +$10 CLUT data (red, green,
  * blue, then one more write per entry), +$20 control (bits 0-2: 1, 2, 4,
@@ -55,6 +56,7 @@
 #define R_VDC_ENB       0x010
 #define R_VID_IN_SIZE   0x014
 #define R_VDC_CLK       0x018   /* 1: capture stopped */
+#define R_SCAN_CTL      0x01c   /* 1: interlaced */
 #define R_SENSE_CTL     0x058
 #define R_SENSE0        0x05c
 #define R_SENSE1        0x060
@@ -168,7 +170,10 @@ static void civic_size(MacCivicState *s, unsigned *w, unsigned *h)
     unsigned val = civic_reg(s, R_VAL, 12), vfp = civic_reg(s, R_VFP, 12);
 
     *w = hfp > hal ? (hfp - hal) * 2 : 0;
-    *h = vfp > val ? (vfp - val) / 2 : 0;
+    *h = vfp > val ? (vfp - val) : 0;
+    if (!civic_reg(s, R_SCAN_CTL, 1)) {
+        *h /= 2;
+    }
     if (!*w || !*h || *w > 1152 || *h > 870) {
         *w = civic_monitor(s)->width;
         *h = civic_monitor(s)->height;
@@ -200,7 +205,7 @@ typedef struct CivicWindow {
 /*
  * The VIn registers count like the display's: horizontally from HAL in
  * units of 2 pixels (1 with a 16-bit video buffer or screen), vertically
- * from VAL in half lines
+ * from VAL in half lines (lines when interlaced)
  */
 static bool civic_video_window(MacCivicState *s, unsigned w, unsigned h,
                                CivicWindow *win)
@@ -208,14 +213,15 @@ static bool civic_video_window(MacCivicState *s, unsigned w, unsigned h,
     int hal = civic_reg(s, R_HAL, 12), val = civic_reg(s, R_VAL, 12);
     int k = (s->dac_ctrl & DAC_CTRL_VIDEO_16) || (s->dac_ctrl & 7) == 4 ?
             1 : 2;
+    int half = !civic_reg(s, R_SCAN_CTL, 1);
 
     if (!(s->dac_ctrl & DAC_CTRL_VIDEO_ON)) {
         return false;
     }
     win->x0 = MAX((int)civic_reg(s, R_VIN_HAL, 12) + 1 - hal, 0) * k;
     win->x1 = MIN(((int)civic_reg(s, R_VIN_HFP, 12) + 1 - hal) * k, (int)w);
-    win->y0 = MAX((int)civic_reg(s, R_VIN_VAL, 12) - val, 0) / 2;
-    win->y1 = MIN(((int)civic_reg(s, R_VIN_VFP, 12) - val) / 2, (int)h);
+    win->y0 = MAX((int)civic_reg(s, R_VIN_VAL, 12) - val, 0) >> half;
+    win->y1 = MIN(((int)civic_reg(s, R_VIN_VFP, 12) - val) >> half, (int)h);
     return win->x0 < win->x1 && win->y0 < win->y1;
 }
 
@@ -309,7 +315,9 @@ static bool civic_update_display(void *opaque)
     DisplaySurface *surface = qemu_console_surface(s->con);
     DirtyBitmapSnapshot *snap;
     uint8_t *vram = memory_region_get_ram_ptr(&s->vram);
-    uint32_t rowbytes = civic_reg(s, R_ROW_WORDS, 8) * 32;
+    /* interlaced, each field steps over the other's lines */
+    uint32_t rowbytes = civic_reg(s, R_ROW_WORDS, 8) * 32 >>
+                        civic_reg(s, R_SCAN_CTL, 1);
     uint32_t base = civic_reg(s, R_BASE_ADDR, 9) * 32;
     unsigned w, h;
     int y, ymin = -1;
