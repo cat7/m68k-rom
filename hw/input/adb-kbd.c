@@ -227,6 +227,57 @@ static int adb_kbd_poll(ADBDevice *d, uint8_t *obuf)
     return 2;
 }
 
+/*
+ * Register 2: the modifier keys and LEDs, active low
+ * (bit 14 Delete, 13 Caps Lock, 12 Reset, 11 Control, 10 Shift, 9 Option,
+ * 8 Command, 7 Num Lock/Clear, 6 Scroll Lock; 2-0 the LEDs, all off)
+ */
+static void adb_kbd_reg2(KBDState *s, uint8_t *obuf)
+{
+    static const struct {
+        uint8_t keycode;
+        uint16_t bit;
+    } mods[] = {
+        { 0x33, 1 << 14 },  /* Delete */
+        { 0x39, 1 << 13 },  /* Caps Lock */
+        { 0x7f, 1 << 12 },  /* Reset (power) */
+        { 0x36, 1 << 11 }, { 0x7d, 1 << 11 },   /* Control */
+        { 0x38, 1 << 10 }, { 0x7b, 1 << 10 },   /* Shift */
+        { 0x3a, 1 << 9 }, { 0x7c, 1 << 9 },     /* Option */
+        { 0x37, 1 << 8 },   /* Command */
+        { 0x47, 1 << 7 },   /* Num Lock/Clear */
+        { 0x6b, 1 << 6 },   /* Scroll Lock (F14) */
+    };
+    uint16_t r = 0xffff;
+    int i;
+
+    for (i = 0; i < ARRAY_SIZE(mods); i++) {
+        if (test_bit(mods[i].keycode, s->pressed)) {
+            r &= ~mods[i].bit;
+        }
+    }
+    obuf[0] = r >> 8;
+    obuf[1] = r;
+}
+
+/*
+ * A reset or a Flush empties the keyboard's buffer, but keys still held
+ * down are reported again as new presses: Mac OS flushes the keyboard
+ * before it polls it at startup, and still sees Shift, C or
+ * Command-Option-P-R held from power-on.
+ */
+static void adb_kbd_resend_held(KBDState *s)
+{
+    int k;
+
+    s->wptr = s->rptr = s->count = 0;
+    for (k = 0; k < 128; k++) {
+        if (test_bit(k, s->pressed)) {
+            adb_kbd_put_keycode(s, k);
+        }
+    }
+}
+
 static int adb_kbd_request(ADBDevice *d, uint8_t *obuf,
                            const uint8_t *buf, int len)
 {
@@ -234,8 +285,8 @@ static int adb_kbd_request(ADBDevice *d, uint8_t *obuf,
     int cmd, reg, olen;
 
     if ((buf[0] & 0x0f) == ADB_FLUSH) {
-        /* flush keyboard fifo */
-        s->wptr = s->rptr = s->count = 0;
+        /* flush keyboard fifo; keys still down are reported again */
+        adb_kbd_resend_held(s);
         return 0;
     }
 
@@ -285,8 +336,7 @@ static int adb_kbd_request(ADBDevice *d, uint8_t *obuf,
         case 1:
             break;
         case 2:
-            obuf[0] = 0x00; /* XXX: check this */
-            obuf[1] = 0x07; /* led status */
+            adb_kbd_reg2(s, obuf);
             olen = 2;
             break;
         case 3:
@@ -362,10 +412,8 @@ static void adb_kbd_reset(DeviceState *dev)
     d->handler = 1;
     d->devaddr = ADB_DEVID_KEYBOARD;
     memset(s->data, 0, sizeof(s->data));
-    s->rptr = 0;
-    s->wptr = 0;
-    s->count = 0;
-    bitmap_zero(s->pressed, 128);
+    /* the host's keys stay down: keep them in pressed[] */
+    adb_kbd_resend_held(s);
 }
 
 static const QemuInputHandler adb_keyboard_handler = {
