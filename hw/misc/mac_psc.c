@@ -42,6 +42,8 @@
 #include "system/address-spaces.h"
 #include "system/dma.h"
 #include "hw/misc/mac_psc.h"
+#include "dsp3210/dsp3210_emu.h"
+#include "system/calib-governor.h"
 #include "migration/vmstate.h"
 #include "trace.h"
 
@@ -305,6 +307,256 @@ static void psc_dma_kick(MacPSCState *s, int c)
     }
 }
 
+/* --- the DSP3210 ------------------------------------------------------ */
+
+#define DSP_SLICE_NS    (100 * SCALE_US)
+#define DSP_MAX_STEPS   100000
+#define DSP_BOOT_NS     (2 * NANOSECONDS_PER_SECOND)   /* host handshakes */
+#define DSP_CHIP        0x50030000u     /* on-chip window, processor mode */
+#define DSP_IO_ALIAS    0xf0000000u     /* the host's I/O, from $50800000 */
+#define DSP_IO_SIZE     0x00800000u
+#define DSP_IO_HOST     0x50800000u
+
+#define LV5_DSP         0x01            /* doorbell: BIO0 changed */
+#define LV5_FRMOVRN     0x02            /* frame overrun */
+
+#define OVRN_DSPRESET   0x01
+#define OVRN_FRMOVRN    0x04
+
+/* the BIO register reads back each pin and its output bit */
+static uint32_t psc_dsp_bio_read(MacPSCState *s)
+{
+    uint8_t pins = s->dsp_bio & s->dsp_bioc;
+    uint32_t v = 0;
+    int i;
+
+    for (i = 0; i < 8; i++) {
+        v |= ((pins >> i) & 1) << (2 * i);
+        v |= ((s->dsp_bio >> i) & 1) << (2 * i + 1);
+    }
+    return v;
+}
+
+/* the on-chip MMIO word at offset @off, as a big-endian longword */
+static uint32_t psc_dsp_mmio_word(MacPSCState *s, uint32_t off)
+{
+    switch (off) {
+    case 0x410:
+        return s->dsp_tcon;
+    case 0x414:
+        return s->dsp_timer_count;
+    case 0x418:
+        return s->dsp_bioc;
+    case 0x41c:
+        return psc_dsp_bio_read(s);
+    }
+    return 0;
+}
+
+static uint32_t psc_dsp_io_read(void *ctx, uint32_t addr, int size,
+                                int *fault)
+{
+    MacPSCState *s = ctx;
+    uint8_t buf[4];
+
+    if (addr - DSP_CHIP < 0x10000u) {
+        uint32_t off = addr - DSP_CHIP;
+        uint32_t w = psc_dsp_mmio_word(s, off & ~3u);
+
+        return extract32(w, (4 - (off & 3) - size) * 8, size * 8);
+    }
+    if (addr - DSP_IO_ALIAS < DSP_IO_SIZE &&
+        address_space_read(s->dma_as, DSP_IO_HOST + (addr - DSP_IO_ALIAS),
+                           MEMTXATTRS_UNSPECIFIED, buf, size) == MEMTX_OK) {
+        return size == 4 ? ldl_be_p(buf) : size == 2 ? lduw_be_p(buf)
+                                                     : buf[0];
+    }
+    trace_mac_psc_dsp_berr(addr);
+    *fault = 1;
+    return 0;
+}
+
+static void psc_dsp_io_write(void *ctx, uint32_t addr, uint32_t val, int size,
+                             int *fault)
+{
+    MacPSCState *s = ctx;
+    uint8_t buf[4];
+
+    if (addr - DSP_CHIP < 0x10000u) {
+        uint32_t off = addr - DSP_CHIP;
+        unsigned shift = (4 - (off & 3) - size) * 8;
+        uint32_t mask = MAKE_64BIT_MASK(shift, size * 8);
+        uint32_t data = val << shift;
+        uint8_t bio;
+        int i;
+
+        trace_mac_psc_dsp_mmio_write(off, val, size);
+        switch (off & ~3u) {
+        case 0x410:
+            if (mask & 0xff) {
+                s->dsp_tcon = data;
+            }
+            break;
+        case 0x414:
+            s->dsp_timer_count = s->dsp_timer_reload =
+                (s->dsp_timer_count & ~mask) | (data & mask);
+            break;
+        case 0x418:
+            if (mask & 0xff) {
+                s->dsp_bioc = data;
+            }
+            break;
+        case 0x41c:
+            /* two bits per pin: keep, clear, set, toggle */
+            bio = s->dsp_bio;
+            for (i = 0; i < 8; i++) {
+                switch (((data & mask) >> (2 * i)) & 3) {
+                case 1:
+                    bio &= ~(1 << i);
+                    break;
+                case 2:
+                    bio |= 1 << i;
+                    break;
+                case 3:
+                    bio ^= 1 << i;
+                    break;
+                }
+            }
+            /* a change of BIO0 rings the host (whatever bioc says) */
+            if ((bio ^ s->dsp_bio) & 1) {
+                s->lvl_latch[2] |= LV5_DSP;
+                psc_update_ipl(s);
+            }
+            s->dsp_bio = bio;
+            break;
+        }
+        return;
+    }
+    if (addr - DSP_IO_ALIAS < DSP_IO_SIZE) {
+        if (size == 4) {
+            stl_be_p(buf, val);
+        } else if (size == 2) {
+            stw_be_p(buf, val);
+        } else {
+            buf[0] = val;
+        }
+        if (address_space_write(s->dma_as,
+                                DSP_IO_HOST + (addr - DSP_IO_ALIAS),
+                                MEMTXATTRS_UNSPECIFIED, buf, size) ==
+            MEMTX_OK) {
+            return;
+        }
+    }
+    trace_mac_psc_dsp_berr(addr);
+    *fault = 1;
+}
+
+/* the timer, counting CKI/4 per instruction slot when tcon[0] is set */
+static void psc_dsp_timer_tick(MacPSCState *s, uint32_t slots)
+{
+    if (!(s->dsp_tcon & 1) || !slots) {
+        return;
+    }
+    while (slots) {
+        if (s->dsp_timer_count > slots) {
+            s->dsp_timer_count -= slots;
+            return;
+        }
+        slots -= s->dsp_timer_count;
+        s->dsp_timer_count = 0;
+        dsp3210_request_interrupt(s->dsp, DSP3210_VEC_TIMER);
+        if (!(s->dsp_tcon & 2) || !s->dsp_timer_reload) {
+            return;                 /* one-shot */
+        }
+        s->dsp_timer_count = s->dsp_timer_reload;
+    }
+}
+
+static void psc_dsp_run(void *opaque)
+{
+    MacPSCState *s = opaque;
+    int64_t now = qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL);
+    int64_t steps = muldiv64(now - s->dsp_last_ns, s->dsp_hz / 4,
+                             NANOSECONDS_PER_SECOND);
+    int64_t i;
+    int st;
+
+    s->dsp_last_ns = now;
+    if (!s->dsp_running || s->dsp_dead) {
+        return;
+    }
+    steps = MIN(steps, DSP_MAX_STEPS);
+    for (i = 0; i < steps; i++) {
+        st = dsp3210_step(s->dsp);
+        if (!(s->dsp_tcon & 1)) {
+            if (st == DSP3210_STEP_WAITI) {
+                break;              /* asleep, nothing to count */
+            }
+        } else {
+            /* per slot: the kernel times short stretches of its code */
+            psc_dsp_timer_tick(s, 1);
+        }
+        if (st == DSP3210_STEP_BKPT || st == DSP3210_STEP_DERROR) {
+            qemu_log_mask(LOG_GUEST_ERROR, "mac-psc: DSP stopped (%s) at "
+                          "0x%08x\n", dsp3210_step_name(st),
+                          s->dsp->cur_insn);
+            s->dsp_dead = true;
+            calib_governor_set_coproc_busy(false);
+            return;
+        }
+    }
+    trace_mac_psc_dsp_slice(i, s->dsp->cur_insn, s->dsp->waiting,
+                            s->dsp->pending, s->dsp->emr);
+    /* the 68040's polling loops wait at real speed while it works */
+    calib_governor_set_coproc_busy(!s->dsp->waiting ||
+                                   now - s->dsp_start_ns < DSP_BOOT_NS);
+    timer_mod(s->dsp_timer, now + DSP_SLICE_NS);
+}
+
+/* DSPRESET held or released */
+static void psc_dsp_set_reset(MacPSCState *s, bool hold)
+{
+    if (!s->dsp || hold == !s->dsp_running) {
+        return;
+    }
+    trace_mac_psc_dsp_reset(hold);
+    if (hold) {
+        s->dsp_running = false;
+        timer_del(s->dsp_timer);
+        calib_governor_set_coproc_busy(false);
+        return;
+    }
+    /* processor mode: it runs from physical 0, the window at $50030000 */
+    dsp3210_reset(s->dsp, 0);
+    s->dsp_bio = 0;
+    s->dsp_dead = false;
+    s->dsp_running = true;
+    calib_governor_set_coproc_busy(true);
+    s->dsp_last_ns = qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL);
+    s->dsp_start_ns = s->dsp_last_ns;
+    timer_mod(s->dsp_timer, s->dsp_last_ns + DSP_SLICE_NS);
+}
+
+/* a sound frame: IR1 to the DSP; an untaken one is an overrun */
+static void psc_dsp_frame(MacPSCState *s)
+{
+    if (!s->dsp_running || s->dsp_dead) {
+        return;
+    }
+    trace_mac_psc_dsp_frame(s->dsp->pending);
+    if (s->dsp->pending & (1u << DSP3210_VEC_EXT1)) {
+        s->dsp_overrun |= OVRN_FRMOVRN;
+        s->lvl_src[2] |= LV5_FRMOVRN;
+        psc_update_ipl(s);
+        return;
+    }
+    /*
+     * A short low pulse on IR1: the kernel times a frame by waiting for
+     * two pulses in a row, so one must be over before its code gets back.
+     */
+    dsp3210_ext_pulse(s->dsp, DSP3210_VEC_EXT1, 4);
+}
+
 /* --- sound ---------------------------------------------------------- */
 
 static uint32_t psc_snd_rate(MacPSCState *s)
@@ -403,7 +655,8 @@ static void psc_frame(void *opaque)
 
     if (s->snd_com & SNDCOM_OUTEN) {
         base = s->snd_out_base + half * size * 4;
-        mute = (s->singer_ctl & 0x00400000) || (s->dsp_overrun & 1);
+        mute = (s->singer_ctl & 0x00400000) ||
+               (s->dsp_overrun & OVRN_DSPRESET);
         for (i = 0; i < size; i++) {
             next = (s->out_tail + 1) % OUT_RING;
             if (next == s->out_head) {
@@ -424,6 +677,7 @@ static void psc_frame(void *opaque)
         }
     }
     if (s->snd_com & SNDCOM_FRMIE) {
+        psc_dsp_frame(s);
         s->ifr |= PV_SND_FRAME;
         psc_update_ipl(s);
     }
@@ -695,6 +949,13 @@ static void psc_reg_write32(MacPSCState *s, hwaddr addr, uint32_t val,
             } else {
                 s->dsp_overrun &= ~bits & 7;
             }
+            /* the frame overrun is a level on level 5 until cleared here */
+            s->lvl_src[2] = deposit32(s->lvl_src[2], 1, 1,
+                                      !!(s->dsp_overrun & OVRN_FRMOVRN));
+            psc_update_ipl(s);
+            if (bits & OVRN_DSPRESET) {
+                psc_dsp_set_reset(s, s->dsp_overrun & OVRN_DSPRESET);
+            }
         }
         return;
     }
@@ -800,7 +1061,8 @@ static void psc_reset(DeviceState *dev)
     s->snd_com = 0;
     s->singer_ctl = 0x00400000;     /* muted */
     s->snd_size = 240;              /* 10 ms at 24 kHz */
-    s->dsp_overrun = 0;
+    s->dsp_overrun = OVRN_DSPRESET;
+    psc_dsp_set_reset(s, true);
     s->out_head = s->out_tail = 0;
     psc_snd_restart(s);
     psc_update_dma_irq(s);
@@ -815,6 +1077,14 @@ static void psc_realize(DeviceState *dev, Error **errp)
                                      &DEVICE(s)->mem_reentrancy_guard);
     s->frame_timer = timer_new_ns(QEMU_CLOCK_VIRTUAL, psc_frame, s);
     s->out_ring = g_new0(int16_t, 2 * OUT_RING);
+    if (s->dsp_ram) {
+        s->dsp = g_new0(struct dsp3210_emu, 1);
+        dsp3210_init(s->dsp, s->dsp_ram, s->dsp_ram_size);
+        s->dsp->io_read_fn = psc_dsp_io_read;
+        s->dsp->io_write_fn = psc_dsp_io_write;
+        s->dsp->hook_ctx = s;
+        s->dsp_timer = timer_new_ns(QEMU_CLOCK_VIRTUAL, psc_dsp_run, s);
+    }
     if (s->audio_be || audio_be_check(&s->audio_be, NULL)) {
         psc_open_voice(s);
     }

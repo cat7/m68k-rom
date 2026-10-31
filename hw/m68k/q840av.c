@@ -355,6 +355,10 @@ static void q840av_init(MachineState *machine)
     /* PSC */
     object_initialize_child(OBJECT(machine), "psc", &m->psc, TYPE_MAC_PSC);
     dev = DEVICE(&m->psc);
+    /* the DSP3210 (66.67 MHz) sees the RAM at 0 */
+    m->psc.dsp_ram = memory_region_get_ram_ptr(machine->ram);
+    m->psc.dsp_ram_size = machine->ram_size;
+    m->psc.dsp_hz = 66666667;
     if (machine->audiodev) {
         qdev_prop_set_string(dev, "audiodev", machine->audiodev);
     }

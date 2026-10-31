@@ -372,6 +372,11 @@ mac_psc_via2_read(uint64_t addr, uint8_t val) "+0x%04"PRIx64" -> 0x%02x"
 mac_psc_via2_write(uint64_t addr, uint64_t val) "+0x%04"PRIx64" <- 0x%02"PRIx64
 mac_psc_reg_read(uint64_t addr, unsigned size, uint32_t val) "+0x%04"PRIx64" (%u) -> 0x%x"
 mac_psc_reg_write(uint64_t addr, unsigned size, uint64_t val) "+0x%04"PRIx64" (%u) <- 0x%"PRIx64
+mac_psc_dsp_reset(bool hold) "DSP %d"
+mac_psc_dsp_slice(int64_t steps, uint32_t pc, int waiting, uint16_t pending, uint16_t emr) "%"PRId64" steps, pc 0x%08x waiting %d pending 0x%04x emr 0x%04x"
+mac_psc_dsp_frame(uint16_t pending) "frame, pending 0x%04x"
+mac_psc_dsp_berr(uint32_t addr) "DSP bus error at 0x%08x"
+mac_psc_dsp_mmio_write(uint32_t off, uint32_t val, int size) "DSP MMIO +0x%04x <- 0x%x (%d)"
 
 # mac_pseudovia.c
 mac_pseudovia_read(uint64_t reg, uint8_t val) "reg 0x%02"PRIx64" -> 0x%02x"

@@ -2251,4 +2251,9 @@ void HELPER(delay_loop)(CPUM68KState *env)
 {
     calib_governor_delay_insn(env_cpu(env));
 }
+
+void HELPER(poll_loop)(CPUM68KState *env, uint32_t insns)
+{
+    calib_governor_poll_loop(env_cpu(env), insns);
+}
 #endif /* !CONFIG_USER_ONLY */

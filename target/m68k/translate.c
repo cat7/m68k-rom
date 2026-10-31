@@ -1458,6 +1458,12 @@ DISAS_INSN(dbcc)
     if (base + offset == s->base.pc_next) {
         /* `dbcc dN,self`: a delay loop, which the governor may pace */
         gen_helper_delay_loop(tcg_env);
+    } else if (base + offset < s->base.pc_next &&
+               s->base.pc_next - (base + offset) <= 256) {
+        /* a short countdown loop: maybe polling a coprocessor */
+        gen_helper_poll_loop(tcg_env,
+                             tcg_constant_i32((s->base.pc_next -
+                                               (base + offset) + 3) / 4));
     }
 #endif
     l1 = gen_new_label();
@@ -2991,6 +2997,16 @@ DISAS_INSN(branch)
     if (op > 1) {
         /* Bcc */
         TCGLabel *l1 = gen_new_label();
+
+#ifndef CONFIG_USER_ONLY
+        if (base + offset < s->base.pc_next &&
+            s->base.pc_next - (base + offset) <= 32) {
+            /* a tight loop: maybe polling a coprocessor */
+            gen_helper_poll_loop(tcg_env,
+                                 tcg_constant_i32((s->base.pc_next -
+                                                   (base + offset) + 3) / 4));
+        }
+#endif
         gen_jmpcc(s, ((insn >> 8) & 0xf) ^ 1, l1);
         gen_jmp_tb(s, 1, base + offset, s->base.pc_next);
         gen_set_label(l1);

@@ -60,13 +60,13 @@ What the branch adds
 - **Quadra 840AV:** Apple's "Cyclone" chips: the YMCA memory controller
   (8-128 MB in 16 MB banks, plus at most one of 4 or 8 MB), the PSC
   (pseudo-VIA2, interrupt levels 3-6, DMA for SCSI and Ethernet, the
-  sound engine that plays the startup chime) and the Civic video with
+  sound engine) and the Civic video with
   its Sebastian DAC on the 12", 13", 15" portrait, 16", 19" and 21"
   monitors. 1 MB of VRAM, or 2 MB (``-global mac-civic.vram-size``)
   for millions of colours. Built-in Ethernet is the MACE
-  (``-nic ...,model=mace``); three NuBus slots ($C-$E). Not there yet: the
-  "New Age" floppy controller, and the DSP3210, so Mac OS has no sound
-  (only the ROM's chime plays).
+  (``-nic ...,model=mace``); three NuBus slots ($C-$E). Mac OS sound goes
+  through the emulated AT&T DSP3210 (core from pappadf's MIT-licensed
+  dsp3210-sdk). Not there yet: the "New Age" floppy controller.
 - **Floppies:** the original SWIM, the IWM mode for the Mac II family, and
   the IIfx/Quadra 900 SWIM IOP. Supported images are 400K and 800K (GCR)
   and 720K and 1.44 MB (MFM). They can be read, written and formatted

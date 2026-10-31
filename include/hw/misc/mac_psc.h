@@ -57,6 +57,19 @@ struct MacPSCState {
     MemoryRegion regs_mmio;
     MemoryRegion *scsi_pdma;    /* the 53C96's pseudo-DMA data window */
     MacMACEState *mace;         /* the Ethernet controller */
+
+    /* the DSP3210: it sees the machine's RAM at 0 */
+    uint8_t *dsp_ram;
+    uint64_t dsp_ram_size;
+    uint32_t dsp_hz;            /* CKI; one instruction per 4 */
+    struct dsp3210_emu *dsp;
+    QEMUTimer *dsp_timer;
+    bool dsp_running;
+    bool dsp_dead;              /* double error or bkpt: stopped */
+    int64_t dsp_last_ns;
+    int64_t dsp_start_ns;       /* last release from reset */
+    uint8_t dsp_bio, dsp_bioc, dsp_tcon;
+    uint32_t dsp_timer_count, dsp_timer_reload;
     AddressSpace *dma_as;
     qemu_irq ipl;               /* the CPU's interrupt level, 0-6 */
     QEMUTimer *frame_timer;

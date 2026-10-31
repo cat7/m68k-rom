@@ -125,6 +125,10 @@ typedef struct CalibGovVCPU {
     uint64_t delay_insn;
     int64_t delay_start_ns;
     int64_t delay_last_ns;
+    /* polling-loop pacing (coprocessor busy) */
+    uint64_t poll_insn;
+    int64_t poll_start_ns;
+    int64_t poll_last_ns;
 } CalibGovVCPU;
 
 static CalibGovVCPU gov_vcpu[CALIB_GOV_MAX_CPUS];
@@ -141,6 +145,7 @@ static void (*gov_irq_cb)(void *opaque);
 static void *gov_irq_opaque;
 static int64_t gov_irq_due_ns;          /* host monotonic, one-shot expiry */
 static int64_t gov_oneshot_due_ns;      /* host monotonic, any T2 one-shot */
+static bool gov_coproc_busy;            /* a coprocessor works for the CPU */
 static bool gov_irq_delivered;
 
 /* Window state, written with the BQL held. */
@@ -541,6 +546,41 @@ void calib_governor_account(CPUState *cpu, uint64_t pc, unsigned int n_insns)
 #define CALIB_GOV_DELAY_CHECK   64
 /* a pause longer than this starts a new loop */
 #define CALIB_GOV_DELAY_GAP_NS  (1000 * 1000)
+
+void calib_governor_set_coproc_busy(bool busy)
+{
+    qatomic_set(&gov_coproc_busy, busy);
+}
+
+void calib_governor_poll_loop(CPUState *cpu, unsigned insns)
+{
+    CalibGovVCPU *v;
+    int64_t now, due_ns, elapsed_ns;
+    unsigned index = cpu->cpu_index;
+
+    if (!gov_enabled || !qatomic_read(&gov_coproc_busy) ||
+        unlikely(index >= CALIB_GOV_MAX_CPUS) || icount_enabled()) {
+        return;
+    }
+    v = &gov_vcpu[index];
+    v->poll_insn += insns;
+    if (v->poll_insn % (CALIB_GOV_DELAY_CHECK * 4) >= insns) {
+        return;
+    }
+    now = now_ns();
+    if (now - v->poll_last_ns > CALIB_GOV_DELAY_GAP_NS) {
+        v->poll_start_ns = now;
+        v->poll_insn = 0;
+    }
+    due_ns = (int64_t)((double)v->poll_insn / (double)gov_insn_per_second *
+                       (double)NSEC_IN_ONE_SEC);
+    elapsed_ns = now - v->poll_start_ns;
+    if (due_ns > elapsed_ns) {
+        throttle_sleep(due_ns - elapsed_ns);
+        now = now_ns();
+    }
+    v->poll_last_ns = now;
+}
 
 void calib_governor_delay_insn(CPUState *cpu)
 {

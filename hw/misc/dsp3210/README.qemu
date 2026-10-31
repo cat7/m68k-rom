@@ -1,0 +1,13 @@
+DSP3210 emulator core
+=====================
+
+The AT&T DSP3210 core used by the Quadra 840AV (hw/misc/mac_psc.c) comes
+from the dsp3210-sdk by pappadf, https://github.com/pappadf/dsp3210-sdk,
+commit 0e2e1d5f6a7166ae11a001835d392796fc88febe, under the MIT licence in
+LICENSE: dsp3210emu/dsp3210_emu.c, dsp3210_emu.h and
+dsp3210_dau_double.inc (the approximate, host-double DAU).
+
+Local change: io_read_fn/io_write_fn hooks in struct dsp3210_emu (marked
+"QEMU"), consulted only for the on-chip MMIO words and for addresses
+outside the window and the flat memory, so that plain memory keeps the
+built-in map and its DA store shadow.

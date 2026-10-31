@@ -54,6 +54,18 @@ void calib_governor_account(CPUState *cpu, uint64_t pc, unsigned int n_insns);
 void calib_governor_delay_insn(CPUState *cpu);
 
 /*
+ * One pass of a short loop of about @insns instructions (a backward
+ * `dbcc`, or a tight backward `Bcc`). Paced at the model's rate only while a coprocessor
+ * is busy, so that a loop polling it for an answer (the AV Macs' ROM and
+ * DSP Manager wait for the DSP3210 so) takes the time it does on the
+ * real machine while the coprocessor gets that time to run.
+ */
+void calib_governor_poll_loop(CPUState *cpu, unsigned insns);
+
+/* a coprocessor is (not) busy working for the main CPU */
+void calib_governor_set_coproc_busy(bool busy);
+
+/*
  * True when the governor, rather than a fixed-value workaround, is in
  * charge of the calibration. Under icount the guest's clock follows its
  * instruction count, so the ROM measures a deterministic value itself
