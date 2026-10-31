@@ -642,7 +642,16 @@ static void esp_do_dma(ESPState *s)
             return;
         }
         if (s->async_len == 0 && esp_get_tc(s)) {
-            /* Defer until data is available.  */
+            /*
+             * Defer until data is available. The buffer may have run out
+             * while the FIFO still held data: once the FIFO is drained
+             * (by DMA that only moves data while DRQ is up, like the AV
+             * Macs' PSC), ask for the next buffer if none is on its way.
+             */
+            if (fifo8_num_used(&s->fifo) < 2 && !s->current_req->aiocb &&
+                s->ti_size) {
+                scsi_req_continue(s->current_req);
+            }
             return;
         }
         if (len > s->async_len) {

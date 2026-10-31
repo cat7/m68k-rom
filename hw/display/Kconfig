@@ -140,6 +140,9 @@ config ATI_VGA
 config MAC_LC_VIDEO
     bool
 
+config MAC_CIVIC
+    bool
+
 config MACFB
     bool
     select FRAMEBUFFER

@@ -257,6 +257,9 @@ config MAC_OSS
 config MAC_PSEUDOVIA
     bool
 
+config MAC_PSC
+    bool
+
 config MAC_IOP
     bool
     select ADB

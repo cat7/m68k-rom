@@ -2,7 +2,7 @@
 More 68k Macs for qemu-system-m68k (q700)
 ==========================================
 
-This ``q700`` branch is a personal fork of QEMU. It adds eleven 68k
+This ``q700`` branch is a personal fork of QEMU. It adds twelve 68k
 Macintosh models to ``qemu-system-m68k``, next to the Quadra 800 that QEMU
 already has. It is an experiment and is not meant for upstream QEMU.
 
@@ -19,6 +19,7 @@ Machine       Model                   CPU        ROM
 ``q700``      Macintosh Quadra 700    68040      Quadra 700/900 ROM
 ``q900``      Macintosh Quadra 900    68040      Quadra 700/900 ROM
 ``q950``      Macintosh Quadra 950    68040      Quadra 950 ROM
+``q840av``    Macintosh Quadra 840AV  68040      Quadra 660AV/840AV ROM
 ``maclc``     Macintosh LC            68020      LC ROM
 ``maclc2``    Macintosh LC II         68030      LC II ROM
 ``maclc3``    Macintosh LC III        68030      LC III ROM
@@ -26,8 +27,8 @@ Machine       Model                   CPU        ROM
 ``q800``      Macintosh Quadra 800    68040      Quadra 800 ROM (upstream)
 ============  ======================  =========  ==============================
 
-All of them boot System 7 to the Finder from SCSI disks, CD-ROMs and
-floppies. A/UX 3.0.1 runs on the Quadra 700.
+All of them boot System 7 to the Finder from SCSI disks and CD-ROMs, and
+all but the Quadra 840AV from floppies. A/UX 3.0.1 runs on the Quadra 700.
 
 What the branch adds
 ====================
@@ -56,6 +57,16 @@ What the branch adds
   routes $E00000 to the PDS slot. The PDS slot of all three takes the
   LC 475's Ethernet card. An LC II with 10 MB (8 MB
   of SIMMs) does not size its RAM right yet.
+- **Quadra 840AV:** Apple's "Cyclone" chips: the YMCA memory controller
+  (8-128 MB in 16 MB banks, plus at most one of 4 or 8 MB), the PSC
+  (pseudo-VIA2, interrupt levels 3-6, DMA for SCSI and Ethernet, the
+  sound engine that plays the startup chime) and the Civic video with
+  its Sebastian DAC on the 12", 13", 15" portrait, 16", 19" and 21"
+  monitors. 1 MB of VRAM, or 2 MB (``-global mac-civic.vram-size``)
+  for millions of colours. Built-in Ethernet is the MACE
+  (``-nic ...,model=mace``); three NuBus slots ($C-$E). Not there yet: the
+  "New Age" floppy controller, and the DSP3210, so Mac OS has no sound
+  (only the ROM's chime plays).
 - **Floppies:** the original SWIM, the IWM mode for the Mac II family, and
   the IIfx/Quadra 900 SWIM IOP. Supported images are 400K and 800K (GCR)
   and 720K and 1.44 MB (MFM). They can be read, written and formatted
@@ -64,7 +75,8 @@ What the branch adds
 - **Ethernet:** an Apple NuBus Ethernet card, ``nubus-ethernet``, for the
   Mac II family, and the LC 475 PDS Ethernet card, ``mac-pds-ethernet``,
   for the LCs. Open Transport needs a 68030, so on the LC (68020) the card
-  needs classic AppleTalk and MacTCP.
+  needs classic AppleTalk and MacTCP. The Quadra 840AV's built-in MACE
+  (``mac-mace``).
 - **Shared folder:** a host folder as a Mac disk, through the
   ``nubus-virtio-mmio`` card, ``virtio-9p-device`` and
   ``-fsdev local,...,macos_compat=on`` (file types and resource forks).

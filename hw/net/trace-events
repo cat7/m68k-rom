@@ -20,6 +20,12 @@ lan9118_phy_reset(void) ""
 lance_mem_readw(uint64_t addr, uint32_t ret) "addr=0x%"PRIx64"val=0x%04x"
 lance_mem_writew(uint64_t addr, uint32_t val) "addr=0x%"PRIx64"val=0x%04x"
 
+# mac_mace.c
+mac_mace_read(unsigned reg, uint8_t val) "reg %u -> 0x%02x"
+mac_mace_write(unsigned reg, uint64_t val) "reg %u <- 0x%02"PRIx64
+mac_mace_transmit(size_t len) "transmit %zu bytes"
+mac_mace_receive(size_t len) "receive %zu bytes"
+
 # ne2000.c
 ne2000_read(uint64_t addr, uint64_t val) "read addr=0x%" PRIx64 " val=0x%" PRIx64
 ne2000_write(uint64_t addr, uint64_t val) "write addr=0x%" PRIx64 " val=0x%" PRIx64
