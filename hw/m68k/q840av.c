@@ -8,7 +8,8 @@
  *   PSC    I/O controller: VIA1, a pseudo-VIA2, interrupt levels 3-6,
  *          DMA for SCSI, Ethernet, floppy and SCC, the sound engine and
  *          the DSP's interface
- *   Civic  built-in video, with the Sebastian CLUT/DAC
+ *   Civic  built-in video, with the Sebastian CLUT/DAC, and the video
+ *          input: an SAA7191 decoder and SAA7186 scaler on Cuda's I2C bus
  *
  * plus an 85C30 SCC, a 53C96 SCSI controller, a MACE Ethernet controller,
  * the AT&T DSP3210, Cuda (ADB, clock, PRAM, power) and three NuBus slots
@@ -52,6 +53,7 @@
 #include "hw/misc/mac_via.h"
 #include "hw/misc/mac_psc.h"
 #include "hw/display/mac_civic.h"
+#include "hw/display/saa71xx.h"
 #include "hw/scsi/esp.h"
 #include "hw/net/mac_mace.h"
 #include "hw/block/mac_newage.h"
@@ -256,6 +258,7 @@ static void q840av_init(MachineState *machine)
     const char *bios_name = machine->firmware ?: "Quadra840AV.rom";
     SysBusDevice *sysbus;
     DeviceState *dev;
+    I2CSlave *decoder, *scaler;
     BusState *adb_bus;
     DriveInfo *dinfo;
     ESPState *esp;
@@ -366,10 +369,20 @@ static void q840av_init(MachineState *machine)
                            &error_fatal);
     qdev_realize_and_unref(qdev_new(TYPE_ADB_MOUSE), adb_bus, &error_fatal);
 
+    /* the video input's decoder and scaler, on Cuda's I2C bus */
+    decoder = i2c_slave_create_simple(m->via1.iic, TYPE_SAA7191,
+                                      SAA7191_I2C_ADDR);
+    scaler = i2c_slave_create_simple(m->via1.iic, TYPE_SAA7186,
+                                     SAA7186_I2C_ADDR);
+
     /* Civic video; VBL on the PSC's slot line 6 */
     object_initialize_child(OBJECT(machine), "civic", &m->civic,
                             TYPE_MAC_CIVIC);
     dev = DEVICE(&m->civic);
+    object_property_set_link(OBJECT(dev), "decoder", OBJECT(decoder),
+                             &error_abort);
+    object_property_set_link(OBJECT(dev), "scaler", OBJECT(scaler),
+                             &error_abort);
     if (graphic_width && graphic_height) {
         qdev_prop_set_uint32(dev, "width", graphic_width);
         qdev_prop_set_uint32(dev, "height", graphic_height);

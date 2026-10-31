@@ -183,6 +183,13 @@ mac_civic_write(uint64_t addr, uint64_t val) "+0x%03"PRIx64" <- %"PRIu64
 mac_civic_dac_read(uint64_t addr, uint8_t val) "+0x%02"PRIx64" -> 0x%02x"
 mac_civic_dac_write(uint64_t addr, uint8_t val) "+0x%02"PRIx64" <- 0x%02x"
 mac_civic_clock_write(uint64_t addr, uint64_t val) "+0x%04"PRIx64" <- 0x%02"PRIx64
+mac_civic_video_frame(unsigned w, unsigned h, unsigned fmt, unsigned stride) "%ux%u format %u stride %u"
+mac_civic_video_window(int x0, int y0, int x1, int y1, uint8_t key) "(%d,%d)-(%d,%d) key %u"
+
+# saa71xx.c
+saa7191_write(uint8_t reg, uint8_t val) "reg 0x%02x <- 0x%02x"
+saa7191_status(uint8_t val) "status 0x%02x"
+saa7186_write(uint8_t reg, uint8_t val) "reg 0x%02x <- 0x%02x"
 
 # mac_lc_video.c
 mac_lc_video_ctrl_read(uint64_t addr, uint64_t val) "reg %"PRIu64" -> 0x%02"PRIx64

@@ -1485,6 +1485,31 @@ static int via1_cuda_command(MOS6522Q800VIA1State *v1s, const uint8_t *in,
             via1_cuda_mem_write(v1s, addr + i - 2, in[i]);
         }
         return 0;
+    case CUDA_GET_SET_IIC:
+        /*
+         * The I2C address byte (bit 0 set to read), then the bytes to
+         * write; a read returns one byte. Nothing comes back from an
+         * address nobody answers.
+         */
+        if (in_len < 1) {
+            return -1;
+        }
+        if (in[0] & 1) {
+            if (i2c_start_recv(v1s->iic, in[0] >> 1)) {
+                return 0;
+            }
+            out[0] = i2c_recv(v1s->iic);
+            i2c_nack(v1s->iic);
+            i2c_end_transfer(v1s->iic);
+            return 1;
+        }
+        if (!i2c_start_send(v1s->iic, in[0] >> 1)) {
+            for (i = 1; i < in_len; i++) {
+                i2c_send(v1s->iic, in[i]);
+            }
+            i2c_end_transfer(v1s->iic);
+        }
+        return 0;
     case CUDA_BATTERY_SWAP_SENSE:
         out[0] = 0;
         return 1;
@@ -1940,6 +1965,9 @@ static void mos6522_q800_via1_init(Object *obj)
     /* ADB */
     qbus_init((BusState *)&v1s->adb_bus, sizeof(v1s->adb_bus),
               TYPE_ADB_BUS, DEVICE(v1s), "adb.0");
+
+    /* Cuda's I2C bus (the AV Macs' video input chips) */
+    v1s->iic = i2c_init_bus(DEVICE(obj), "iic");
 
     /* A/UX mode */
     qdev_init_gpio_out(DEVICE(obj), &v1s->auxmode_irq, 1);

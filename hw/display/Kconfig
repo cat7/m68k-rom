@@ -142,6 +142,7 @@ config MAC_LC_VIDEO
 
 config MAC_CIVIC
     bool
+    select I2C
 
 config MACFB
     bool

@@ -31,6 +31,7 @@ struct MacCivicState {
     MemoryRegion regs_mmio;
     MemoryRegion vram;
     MemoryRegion vram_window;
+    MemoryRegion vram_bank_b;     /* with 1 MB: its second half */
     MemoryRegion vram_open_bus;
     MemoryRegion clock_mmio;
     MemoryRegion dac_mmio;
@@ -50,8 +51,23 @@ struct MacCivicState {
     uint8_t dac_step;
     uint8_t dac_ctrl;
     uint8_t clut[256 * 3];
+    uint8_t video_table[256 * 3];  /* for the video input */
     uint8_t clock_regs[4];
     bool invalidate;
+
+    /* video input */
+    char *video_in_name;
+    int video_in;
+    struct HostCam *cam;
+    struct SAA7191State *decoder;
+    struct SAA7186State *scaler;
+    QEMUTimer *video_timer;
+    bool vdc_pending;           /* a frame is done (VDCInt) */
+    bool video_fresh;           /* a new frame to show */
+    uint32_t video_frames;
+    uint32_t *video_src;        /* the host's picture, scaled */
+    unsigned video_w, video_h;
+    uint8_t clut_key[256];      /* the CLUT's 4th bytes: key colours */
 };
 
 #endif

@@ -13,6 +13,7 @@
 #include "hw/core/sysbus.h"
 #include "hw/misc/mos6522.h"
 #include "hw/input/adb.h"
+#include "hw/i2c/i2c.h"
 #include "qom/object.h"
 
 
@@ -118,6 +119,7 @@ struct MOS6522Q800VIA1State {
     bool cuda_time_sent;
     bool cuda_in_time;      /* cuda_in holds the time packet */
     uint8_t cuda_mem[0x100];     /* 68HC05 page 0 (registers, RAM) */
+    I2CBus *iic;                 /* Cuda's I2C bus */
 };
 
 

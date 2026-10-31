@@ -193,6 +193,7 @@ config MAC_VIA
     bool
     select MOS6522
     select ADB
+    select I2C
 
 config AVR_POWER
     bool
