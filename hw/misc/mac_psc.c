@@ -18,7 +18,8 @@
  *                          reads "any enabled", writing a 1 clears an event
  *   +$200  sndComCtl (16 bits): 6 frame interrupt, 7 input, 8 output,
  *          9-10 rate (24, 32, 48 kHz)
- *   +$204  singerCtl          +$20C  sndPhase (read only)
+ *   +$204  singerCtl          +$208  singerStatus (read only)
+ *   +$20C  sndPhase (read only)
  *   +$210  sndInBase          +$214  sndOutBase
  *   +$218  sndSize (16 bits)  +$21C  DSPOVERRUN (8 bits)
  *   +$804  DMA interrupt status, bit 31 - channel
@@ -53,6 +54,13 @@
 #define PV_SCSI_IRQ     0x08
 #define PV_FDC          0x20
 #define PV_SND_FRAME    0x40
+
+/*
+ * singerStatus: what is plugged in. Bit 2 is the sound input jack (with
+ * bit 0 clear, a microphone): without it Mac OS has a sound input, but
+ * Apple Media Conference finds none. Bit 3 turns the speaker off.
+ */
+#define SINGER_STATUS_MIC   0x04
 
 /* sndComCtl */
 #define SNDCOM_FRMIE    0x0040
@@ -850,6 +858,8 @@ static uint32_t psc_reg_read32(MacPSCState *s, hwaddr addr)
         return (uint32_t)s->snd_com << 16;
     case 0x204:
         return s->singer_ctl;
+    case 0x208:
+        return SINGER_STATUS_MIC;
     case 0x20c:
         return psc_snd_phase(s);
     case 0x210:
