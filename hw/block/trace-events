@@ -131,3 +131,12 @@ swim_iwmctrl_read(int reg, const char *name, unsigned size, uint64_t value) "reg
 swim_iwmctrl_write(int reg, const char *name, unsigned size, uint64_t value) "reg=%d [%s] size=%u value=0x%"PRIx64
 swim_switch_to_ism(void) "switch from IWM to ISM mode"
 swim_switch_to_iwm(void) "switch from ISM to IWM mode"
+
+# mac_newage.c
+mac_newage_read(uint64_t addr, uint8_t val) "+0x%03"PRIx64" -> 0x%02x"
+mac_newage_write(uint64_t addr, uint64_t val) "+0x%03"PRIx64" <- 0x%02"PRIx64
+mac_newage_command(uint8_t cmd, uint8_t len, uint8_t sel) "command 0x%02x (%u bytes) sel 0x%02x"
+mac_newage_result(uint8_t cmd, int n, uint8_t r0, uint8_t r1, uint8_t r2) "0x%02x: %d result bytes 0x%02x 0x%02x 0x%02x"
+mac_newage_rw(int unit, bool write, uint8_t c, uint8_t h, unsigned first, unsigned count) "unit %d write %d C%u H%u sectors %u+%u"
+mac_newage_format(int unit, uint8_t c, uint8_t h, uint8_t sc, bool data) "unit %d format C%u H%u %u sectors (data %d)"
+mac_newage_change(int unit, bool in) "unit %d disk in %d"

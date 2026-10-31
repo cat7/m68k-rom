@@ -94,6 +94,7 @@ config Q840AV
     select MAC_PSC
     select MAC_CIVIC
     select MAC_MACE
+    select MAC_NEWAGE
     select NUBUS
     select ESCC
     select ESP

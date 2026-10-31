@@ -80,6 +80,7 @@
 #define DMA_SCSI        0
 #define DMA_ENET_RX     1
 #define DMA_ENET_TX     2
+#define DMA_FDC         3
 
 #define ENET_RX_SLOT    0x800       /* one received frame per 2 KB */
 
@@ -224,7 +225,8 @@ static void psc_dma_set_done(MacPSCState *s, int c)
     psc_update_dma_irq(s);
 }
 
-static MacPSCDMASet *psc_enet_set(MacPSCState *s, int c)
+/* the channel's set to move data with: the current one, else the other */
+static MacPSCDMASet *psc_ready_set(MacPSCState *s, int c)
 {
     MacPSCDMASet *set;
 
@@ -243,11 +245,42 @@ static MacPSCDMASet *psc_enet_set(MacPSCState *s, int c)
     return set;
 }
 
+/*
+ * Floppy DMA: the New Age moves whole sectors at once. A set that runs
+ * out goes on in the other one (the driver arms both for a track read
+ * that starts mid-track).
+ */
+uint32_t mac_psc_fdc_dma(void *opaque, uint8_t *buf, uint32_t len,
+                         bool to_mem)
+{
+    MacPSCState *s = opaque;
+    MacPSCDMASet *set;
+    uint32_t done = 0, n;
+
+    while (done < len && (set = psc_ready_set(s, DMA_FDC))) {
+        n = MIN(len - done, set->count);
+        if (to_mem) {
+            dma_memory_write(s->dma_as, set->addr, buf + done, n,
+                             MEMTXATTRS_UNSPECIFIED);
+        } else {
+            dma_memory_read(s->dma_as, set->addr, buf + done, n,
+                            MEMTXATTRS_UNSPECIFIED);
+        }
+        set->addr += n;
+        set->count -= n;
+        done += n;
+        if (!set->count) {
+            psc_dma_set_done(s, DMA_FDC);
+        }
+    }
+    return done;
+}
+
 bool mac_psc_enet_receive(void *opaque, const uint8_t *buf, size_t len,
                           const uint8_t status[4])
 {
     MacPSCState *s = opaque;
-    MacPSCDMASet *set = psc_enet_set(s, DMA_ENET_RX);
+    MacPSCDMASet *set = psc_ready_set(s, DMA_ENET_RX);
     /* the four status bytes, each in both byte lanes of a word */
     uint8_t hdr[16] = { status[0], status[0], status[1], status[1],
                         status[2], status[2], status[3], status[3] };
@@ -278,7 +311,7 @@ static void psc_enet_tx(MacPSCState *s)
     uint32_t len;
 
     while (s->mace && mac_mace_can_transmit(s->mace) &&
-           (set = psc_enet_set(s, DMA_ENET_TX))) {
+           (set = psc_ready_set(s, DMA_ENET_TX))) {
         len = MIN(set->count, sizeof(buf));
         dma_memory_read(s->dma_as, set->addr, buf, len,
                         MEMTXATTRS_UNSPECIFIED);

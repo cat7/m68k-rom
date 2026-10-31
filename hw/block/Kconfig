@@ -35,3 +35,6 @@ config SWIM
 
 config SWIM2
     bool
+
+config MAC_NEWAGE
+    bool

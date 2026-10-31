@@ -54,6 +54,7 @@
 #include "hw/display/mac_civic.h"
 #include "hw/scsi/esp.h"
 #include "hw/net/mac_mace.h"
+#include "hw/block/mac_newage.h"
 #include "net/net.h"
 #include "hw/nubus/mac-nubus-bridge.h"
 #include "hw/input/adb.h"
@@ -108,13 +109,13 @@ struct Q840AVMachineState {
     MemoryRegion io_open_bus;
     MemoryRegion machine_id;
     MemoryRegion ymca;
-    MemoryRegion fdc;
     MemoryRegion enet_prom;
 
     MOS6522Q800VIA1State via1;
     MacPSCState psc;
     MacCivicState civic;
     MacMACEState mace;
+    MacNewAgeState fdc;
     ESCCState escc;
     SysBusESPState esp;
     MacNubusBridge nubus_bridge;
@@ -221,34 +222,6 @@ static const MemoryRegionOps ymca_ops = {
     },
 };
 
-/* the floppy controller: not there yet; reads its idle status */
-static uint64_t fdc_read(void *opaque, hwaddr addr, unsigned size)
-{
-    qemu_log_mask(LOG_UNIMP, "q840av: floppy read +0x%03" HWADDR_PRIx "\n",
-                  addr);
-    if ((addr & ~3) == 0x100) {
-        return extract32(0x00800000, (4 - (addr & 3) - size) * 8, size * 8);
-    }
-    return 0;
-}
-
-static void fdc_write(void *opaque, hwaddr addr, uint64_t val,
-                      unsigned size)
-{
-    qemu_log_mask(LOG_UNIMP, "q840av: floppy write 0x%" PRIx64 " to +0x%03"
-                  HWADDR_PRIx "\n", val, addr);
-}
-
-static const MemoryRegionOps fdc_ops = {
-    .read = fdc_read,
-    .write = fdc_write,
-    .endianness = DEVICE_BIG_ENDIAN,
-    .valid = {
-        .min_access_size = 1,
-        .max_access_size = 4,
-    },
-};
-
 static void q840av_cpu_reset(void *opaque)
 {
     Q840AVMachineState *m = opaque;
@@ -347,10 +320,6 @@ static void q840av_init(MachineState *machine)
     memory_region_init_io(&m->ymca, OBJECT(m), &ymca_ops, m, "q840av.ymca",
                           0x800);
     memory_region_add_subregion(sysmem, YMCA_BASE, &m->ymca);
-
-    memory_region_init_io(&m->fdc, OBJECT(m), &fdc_ops, m, "q840av.fdc",
-                          0x2000);
-    memory_region_add_subregion(sysmem, FDC_BASE, &m->fdc);
 
     /* PSC */
     object_initialize_child(OBJECT(machine), "psc", &m->psc, TYPE_MAC_PSC);
@@ -490,6 +459,17 @@ static void q840av_init(MachineState *machine)
     m->mace.rx = mac_psc_enet_receive;
     m->mace.rx_opaque = &m->psc;
     m->psc.mace = &m->mace;
+
+    /* the New Age floppy controller, its DMA through the PSC */
+    object_initialize_child(OBJECT(machine), "fdc", &m->fdc, TYPE_MAC_NEWAGE);
+    m->fdc.dma = mac_psc_fdc_dma;
+    m->fdc.dma_opaque = &m->psc;
+    sysbus = SYS_BUS_DEVICE(&m->fdc);
+    sysbus_realize(sysbus, &error_fatal);
+    memory_region_add_subregion(sysmem, FDC_BASE,
+                                sysbus_mmio_get_region(sysbus, 0));
+    sysbus_connect_irq(sysbus, 0, qdev_get_gpio_in(DEVICE(&m->psc),
+                                                   MAC_PSC_IN_FDC));
 
     memory_region_init_rom(&m->enet_prom, NULL, "q840av.enet-prom",
                            0x1000, &error_fatal);

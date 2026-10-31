@@ -109,6 +109,10 @@ struct MacPSCState {
     uint32_t out_head, out_tail;
 };
 
+/* New Age floppy DMA (MacNewAgeDMAFunc): channel 3 */
+uint32_t mac_psc_fdc_dma(void *opaque, uint8_t *buf, uint32_t len,
+                         bool to_mem);
+
 /* MACE receive callback: store a frame through DMA channel 1 */
 bool mac_psc_enet_receive(void *opaque, const uint8_t *buf, size_t len,
                           const uint8_t status[4]);

@@ -28,7 +28,7 @@ Machine       Model                   CPU        ROM
 ============  ======================  =========  ==============================
 
 All of them boot System 7 to the Finder from SCSI disks and CD-ROMs, and
-all but the Quadra 840AV from floppies. A/UX 3.0.1 runs on the Quadra 700.
+from floppies. A/UX 3.0.1 runs on the Quadra 700.
 
 What the branch adds
 ====================
@@ -66,7 +66,8 @@ What the branch adds
   for millions of colours. Built-in Ethernet is the MACE
   (``-nic ...,model=mace``); three NuBus slots ($C-$E). Mac OS sound goes
   through the emulated AT&T DSP3210 (core from pappadf's MIT-licensed
-  dsp3210-sdk). Not there yet: the "New Age" floppy controller.
+  dsp3210-sdk). The "New Age" floppy controller takes 400K/800K and
+  720K/1.44 MB disks in its one drive (no external floppy port).
 - **Floppies:** the original SWIM, the IWM mode for the Mac II family, and
   the IIfx/Quadra 900 SWIM IOP. Supported images are 400K and 800K (GCR)
   and 720K and 1.44 MB (MFM). They can be read, written and formatted
