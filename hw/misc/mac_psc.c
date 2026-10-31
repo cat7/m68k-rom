@@ -29,6 +29,7 @@
  *
  * The sound engine plays and records two halves of a buffer of 2 * sndSize
  * stereo 16-bit samples, interrupting at the end of each half (a "frame").
+ * Recording takes the host's input (a microphone) while the Mac has it on.
  *
  * SPDX-License-Identifier: GPL-2.0-or-later
  */
@@ -93,6 +94,8 @@
 #define ENET_RX_SLOT    0x800       /* one received frame per 2 KB */
 
 #define OUT_RING        8192        /* stereo samples */
+#define IN_RING         8192
+#define IN_DELAY_MS     50          /* covers the host's bursts */
 
 static const uint32_t snd_rates[4] = { 24000, 32000, 48000, 48000 };
 
@@ -685,6 +688,96 @@ static void psc_open_voice(MacPSCState *s)
                                  psc_out_cb, &as);
 }
 
+/* the host has recorded samples: keep them for the next frames */
+static void psc_in_cb(void *opaque, int avail)
+{
+    MacPSCState *s = opaque;
+    int16_t buf[512];
+    size_t n, i;
+
+    while (avail >= 4) {
+        n = audio_be_read(s->audio_be, s->voice_in, buf,
+                          MIN(avail, sizeof(buf)));
+        if (n < 4) {
+            break;
+        }
+        avail -= n;
+        for (i = 0; i < n / 4; i++) {
+            s->in_ring[2 * s->in_tail] = buf[2 * i];
+            s->in_ring[2 * s->in_tail + 1] = buf[2 * i + 1];
+            s->in_tail = (s->in_tail + 1) % IN_RING;
+            if (s->in_tail == s->in_head) {
+                s->in_head = (s->in_head + 1) % IN_RING;  /* drop the oldest */
+            }
+        }
+    }
+}
+
+static void psc_open_voice_in(MacPSCState *s)
+{
+    struct audsettings as = {
+        .freq = psc_snd_rate(s),
+        .nchannels = 2,
+        .fmt = AUDIO_FORMAT_S16,
+        .big_endian = HOST_BIG_ENDIAN,
+    };
+
+    if (!s->audio_be) {
+        return;
+    }
+    s->voice_in = audio_be_open_in(s->audio_be, s->voice_in, "psc.in", s,
+                                   psc_in_cb, &as);
+}
+
+/* the host's input runs only while the Mac records */
+static void psc_voices_active(MacPSCState *s)
+{
+    if (s->voice) {
+        audio_be_set_active_out(s->audio_be, s->voice,
+                                !!(s->snd_com & SNDCOM_OUTEN));
+    }
+    if (s->voice_in) {
+        audio_be_set_active_in(s->audio_be, s->voice_in,
+                               !!(s->snd_com & SNDCOM_INEN));
+    }
+}
+
+/*
+ * A frame of recorded samples. The host delivers them in bursts, so they
+ * wait until there are IN_DELAY_MS more than a frame; after a gap, they
+ * wait again. Too many (the host's clock ran ahead) are dropped.
+ */
+static void psc_record(MacPSCState *s, hwaddr base, uint32_t size)
+{
+    uint32_t fill = (s->in_tail - s->in_head + IN_RING) % IN_RING;
+    uint32_t target = MIN(size + psc_snd_rate(s) * IN_DELAY_MS / 1000,
+                          IN_RING / 3);
+    uint32_t i;
+    int16_t l, r;
+
+    if (fill >= target) {
+        s->in_primed = true;
+    }
+    if (fill > 2 * target) {
+        s->in_head = (s->in_tail - target + IN_RING) % IN_RING;
+    }
+    if (s->in_primed && fill < size) {
+        s->in_primed = false;
+    }
+    for (i = 0; i < size; i++) {
+        if (s->in_primed && s->in_head != s->in_tail) {
+            l = s->in_ring[2 * s->in_head];
+            r = s->in_ring[2 * s->in_head + 1];
+            s->in_head = (s->in_head + 1) % IN_RING;
+        } else {
+            /* nothing: a little noise, as silence upsets speech recognition */
+            l = r = (i * 7 + s->frame_next) % 3 - 1;
+        }
+        stw_be_phys(s->dma_as, base + i * 4, l);
+        stw_be_phys(s->dma_as, base + i * 4 + 2, r);
+    }
+}
+
 static void psc_frame(void *opaque)
 {
     MacPSCState *s = opaque;
@@ -711,11 +804,7 @@ static void psc_frame(void *opaque)
         }
     }
     if (s->snd_com & SNDCOM_INEN) {
-        /* no input: a little noise, as silence upsets speech recognition */
-        base = s->snd_in_base + half * size * 4;
-        for (i = 0; i < size * 2; i++) {
-            stw_be_phys(s->dma_as, base + i * 2, (i * 7 + s->frame_next) % 3 - 1);
-        }
+        psc_record(s, s->snd_in_base + half * size * 4, size);
     }
     if (s->snd_com & SNDCOM_FRMIE) {
         psc_dsp_frame(s);
@@ -733,18 +822,18 @@ static void psc_snd_com_write(MacPSCState *s, uint16_t val)
     s->snd_com = val;
     if ((old ^ val) & (3 << 9)) {
         psc_snd_restart(s);
-        if (val & SNDCOM_OUTEN) {
-            psc_open_voice(s);
-        }
+        psc_open_voice(s);
+        psc_open_voice_in(s);
     }
-    if ((old ^ val) & SNDCOM_OUTEN) {
-        if (!(val & SNDCOM_OUTEN)) {
-            s->out_head = s->out_tail = 0;
-        }
-        if (s->voice) {
-            audio_be_set_active_out(s->audio_be, s->voice,
-                                    !!(val & SNDCOM_OUTEN));
-        }
+    if (!(val & SNDCOM_OUTEN)) {
+        s->out_head = s->out_tail = 0;
+    }
+    if (!(val & SNDCOM_INEN)) {
+        s->in_head = s->in_tail = 0;
+        s->in_primed = false;
+    }
+    if ((old ^ val) & (SNDCOM_OUTEN | SNDCOM_INEN | 3 << 9)) {
+        psc_voices_active(s);
     }
 }
 
@@ -1107,6 +1196,9 @@ static void psc_reset(DeviceState *dev)
     s->dsp_overrun = OVRN_DSPRESET;
     psc_dsp_set_reset(s, true);
     s->out_head = s->out_tail = 0;
+    s->in_head = s->in_tail = 0;
+    s->in_primed = false;
+    psc_voices_active(s);
     psc_snd_restart(s);
     psc_update_dma_irq(s);
 }
@@ -1120,6 +1212,7 @@ static void psc_realize(DeviceState *dev, Error **errp)
                                      &DEVICE(s)->mem_reentrancy_guard);
     s->frame_timer = timer_new_ns(QEMU_CLOCK_VIRTUAL, psc_frame, s);
     s->out_ring = g_new0(int16_t, 2 * OUT_RING);
+    s->in_ring = g_new0(int16_t, 2 * IN_RING);
     if (s->dsp_ram) {
         s->dsp = g_new0(struct dsp3210_emu, 1);
         dsp3210_init(s->dsp, s->dsp_ram, s->dsp_ram_size);
@@ -1130,6 +1223,7 @@ static void psc_realize(DeviceState *dev, Error **errp)
     }
     if (s->audio_be || audio_be_check(&s->audio_be, NULL)) {
         psc_open_voice(s);
+        psc_open_voice_in(s);
     }
 }
 
@@ -1162,10 +1256,22 @@ static const VMStateDescription vmstate_psc_dma_set = {
     },
 };
 
+/* the voices follow the loaded rate and enables */
+static int psc_post_load(void *opaque, int version_id)
+{
+    MacPSCState *s = opaque;
+
+    psc_open_voice(s);
+    psc_open_voice_in(s);
+    psc_voices_active(s);
+    return 0;
+}
+
 static const VMStateDescription vmstate_psc = {
     .name = "mac-psc",
     .version_id = 1,
     .minimum_version_id = 1,
+    .post_load = psc_post_load,
     .fields = (const VMStateField[]) {
         VMSTATE_UINT8(ifr, MacPSCState),
         VMSTATE_UINT8(ier, MacPSCState),

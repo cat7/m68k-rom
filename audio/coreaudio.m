@@ -24,6 +24,7 @@
 
 #include "qemu/osdep.h"
 #include <CoreAudio/CoreAudio.h>
+#include <AudioToolbox/AudioToolbox.h>
 #include <pthread.h>            /* pthread_X */
 
 #include "qemu/main-loop.h"
@@ -650,14 +651,170 @@ static void coreaudio_enable_out(HWVoiceOut *hw, bool enable)
     update_out_device_playback_state(core);
 }
 
+/*
+ * Recording, from the default input device. An audio queue converts the
+ * device's rate and channels to ours; its callback runs on the queue's own
+ * thread and copies each buffer into the voice's ring.
+ */
+typedef struct coreaudioVoiceIn {
+    HWVoiceIn hw;
+    pthread_mutex_t buf_mutex;
+    AudioQueueRef queue;
+    bool exit;
+} CoreaudioVoiceIn;
+
+#define coreaudio_recording_logerr(status, ...) \
+    coreaudio_logerr2(status, "recording", __VA_ARGS__)
+
+/* called without BQL; takes only "buf_mutex" */
+static void in_queue_cb(void *opaque, AudioQueueRef queue,
+                        AudioQueueBufferRef buf, const AudioTimeStamp *start,
+                        UInt32 npackets,
+                        const AudioStreamPacketDescription *desc)
+{
+    CoreaudioVoiceIn *core = opaque;
+    HWVoiceIn *hw = &core->hw;
+    const uint8_t *src = buf->mAudioData;
+    size_t len = buf->mAudioDataByteSize;
+
+    pthread_mutex_lock(&core->buf_mutex);
+    if (core->exit) {
+        pthread_mutex_unlock(&core->buf_mutex);
+        return;
+    }
+    /* when the ring is full, the newest samples are lost */
+    while (hw->pending_emul < hw->size_emul && len) {
+        size_t n = MIN(len, MIN(hw->size_emul - hw->pos_emul,
+                                hw->size_emul - hw->pending_emul));
+
+        memcpy(hw->buf_emul + hw->pos_emul, src, n);
+        hw->pending_emul += n;
+        hw->pos_emul = (hw->pos_emul + n) % hw->size_emul;
+        len -= n;
+        src += n;
+    }
+    /* back in the queue, also while stopped, ready for the next start */
+    AudioQueueEnqueueBuffer(queue, buf, 0, NULL);
+    pthread_mutex_unlock(&core->buf_mutex);
+}
+
+static void *coreaudio_get_buffer_in(HWVoiceIn *hw, size_t *size)
+{
+    CoreaudioVoiceIn *core = (CoreaudioVoiceIn *)hw;
+    void *ret;
+
+    pthread_mutex_lock(&core->buf_mutex);
+    ret = audio_generic_get_buffer_in(hw, size);
+    pthread_mutex_unlock(&core->buf_mutex);
+    return ret;
+}
+
+static void coreaudio_put_buffer_in(HWVoiceIn *hw, void *buf, size_t size)
+{
+    CoreaudioVoiceIn *core = (CoreaudioVoiceIn *)hw;
+
+    pthread_mutex_lock(&core->buf_mutex);
+    audio_generic_put_buffer_in(hw, buf, size);
+    pthread_mutex_unlock(&core->buf_mutex);
+}
+
+static int coreaudio_init_in(HWVoiceIn *hw, struct audsettings *as)
+{
+    CoreaudioVoiceIn *core = (CoreaudioVoiceIn *)hw;
+    Audiodev *dev = hw->s->dev;
+    AudiodevCoreaudioPerDirectionOptions *cpdo = dev->u.coreaudio.in;
+    struct audsettings obt_as = *as;
+    AudioStreamBasicDescription desc;
+    AudioQueueBufferRef buf;
+    UInt32 frames, count, i;
+    OSStatus status;
+
+    obt_as.fmt = AUDIO_FORMAT_F32;
+    obt_as.big_endian = HOST_BIG_ENDIAN;
+    audio_pcm_init_info(&hw->info, &obt_as);
+
+    frames = audio_buffer_frames(
+        qapi_AudiodevCoreaudioPerDirectionOptions_base(cpdo), &obt_as, 11610);
+    count = cpdo->has_buffer_count ? cpdo->buffer_count : 4;
+
+    desc = (AudioStreamBasicDescription) {
+        .mSampleRate = hw->info.freq,
+        .mFormatID = kAudioFormatLinearPCM,
+        .mFormatFlags = kLinearPCMFormatFlagIsFloat |
+                        kLinearPCMFormatFlagIsPacked,
+        .mBytesPerPacket = hw->info.bytes_per_frame,
+        .mFramesPerPacket = 1,
+        .mBytesPerFrame = hw->info.bytes_per_frame,
+        .mChannelsPerFrame = hw->info.nchannels,
+        .mBitsPerChannel = 32,
+    };
+
+    pthread_mutex_init(&core->buf_mutex, NULL);
+    core->exit = false;
+    /* room for twice what the queue holds */
+    hw->samples = 2 * count * frames;
+    audio_generic_initialize_buffer_in(hw);
+
+    status = AudioQueueNewInput(&desc, in_queue_cb, core, NULL, NULL, 0,
+                                &core->queue);
+    if (status != noErr) {
+        coreaudio_recording_logerr(status, "Could not create the input queue");
+        pthread_mutex_destroy(&core->buf_mutex);
+        return -1;
+    }
+    for (i = 0; i < count; i++) {
+        status = AudioQueueAllocateBuffer(core->queue,
+                                          frames * hw->info.bytes_per_frame,
+                                          &buf);
+        if (status != noErr) {
+            coreaudio_recording_logerr(status, "Could not allocate a buffer");
+            AudioQueueDispose(core->queue, true);
+            pthread_mutex_destroy(&core->buf_mutex);
+            return -1;
+        }
+        AudioQueueEnqueueBuffer(core->queue, buf, 0, NULL);
+    }
+    return 0;
+}
+
+static void coreaudio_fini_in(HWVoiceIn *hw)
+{
+    CoreaudioVoiceIn *core = (CoreaudioVoiceIn *)hw;
+
+    pthread_mutex_lock(&core->buf_mutex);
+    core->exit = true;
+    pthread_mutex_unlock(&core->buf_mutex);
+    AudioQueueDispose(core->queue, true);
+    pthread_mutex_destroy(&core->buf_mutex);
+}
+
+/* the queue runs (and the host shows the microphone in use) only when on */
+static void coreaudio_enable_in(HWVoiceIn *hw, bool enable)
+{
+    CoreaudioVoiceIn *core = (CoreaudioVoiceIn *)hw;
+    OSStatus status;
+
+    if (enable) {
+        status = AudioQueueStart(core->queue, NULL);
+        if (status != noErr) {
+            coreaudio_recording_logerr(status, "Could not start recording");
+        }
+    } else {
+        AudioQueueStop(core->queue, true);
+        pthread_mutex_lock(&core->buf_mutex);
+        hw->pos_emul = hw->pending_emul = 0;
+        pthread_mutex_unlock(&core->buf_mutex);
+    }
+}
+
 static void audio_coreaudio_class_init(ObjectClass *klass, const void *data)
 {
     AudioMixengBackendClass *k = AUDIO_MIXENG_BACKEND_CLASS(klass);
 
     k->max_voices_out = 1;
-    k->max_voices_in = 0;
+    k->max_voices_in = 1;
     k->voice_size_out = sizeof(CoreaudioVoiceOut);
-    k->voice_size_in = 0;
+    k->voice_size_in = sizeof(CoreaudioVoiceIn);
 
     k->init_out = coreaudio_init_out;
     k->fini_out = coreaudio_fini_out;
@@ -670,6 +827,13 @@ static void audio_coreaudio_class_init(ObjectClass *klass, const void *data)
     /* wrapper for audio_generic_put_buffer_out */
     k->put_buffer_out = coreaudio_put_buffer_out;
     k->enable_out = coreaudio_enable_out;
+
+    k->init_in = coreaudio_init_in;
+    k->fini_in = coreaudio_fini_in;
+    k->read = audio_generic_read;
+    k->get_buffer_in = coreaudio_get_buffer_in;
+    k->put_buffer_in = coreaudio_put_buffer_in;
+    k->enable_in = coreaudio_enable_in;
 }
 
 static const TypeInfo audio_types[] = {

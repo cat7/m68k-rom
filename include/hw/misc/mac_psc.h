@@ -76,6 +76,7 @@ struct MacPSCState {
     QEMUBH *scsi_bh;
     AudioBackend *audio_be;
     SWVoiceOut *voice;
+    SWVoiceIn *voice_in;
 
     /* pseudo-VIA2 */
     uint8_t ifr;
@@ -107,6 +108,9 @@ struct MacPSCState {
     int64_t frame_next;         /* index of the next frame boundary */
     int16_t *out_ring;          /* stereo samples for the audio backend */
     uint32_t out_head, out_tail;
+    int16_t *in_ring;           /* stereo samples from the host's input */
+    uint32_t in_head, in_tail;
+    bool in_primed;             /* enough is buffered to take from */
 };
 
 /* New Age floppy DMA (MacNewAgeDMAFunc): channel 3 */
