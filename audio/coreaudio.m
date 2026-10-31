@@ -655,12 +655,17 @@ static void coreaudio_enable_out(HWVoiceOut *hw, bool enable)
  * Recording, from the default input device. An audio queue converts the
  * device's rate and channels to ours; its callback runs on the queue's own
  * thread and copies each buffer into the voice's ring.
+ *
+ * A stopped queue hands its buffers back and does not take them again, so
+ * a new queue is made each time recording starts.
  */
 typedef struct coreaudioVoiceIn {
     HWVoiceIn hw;
     pthread_mutex_t buf_mutex;
-    AudioQueueRef queue;
-    bool exit;
+    AudioStreamBasicDescription desc;
+    UInt32 buf_frames, buf_count;
+    AudioQueueRef queue;        /* only while recording */
+    bool running;               /* buffers go back in the queue */
 } CoreaudioVoiceIn;
 
 #define coreaudio_recording_logerr(status, ...) \
@@ -678,7 +683,7 @@ static void in_queue_cb(void *opaque, AudioQueueRef queue,
     size_t len = buf->mAudioDataByteSize;
 
     pthread_mutex_lock(&core->buf_mutex);
-    if (core->exit) {
+    if (!core->running) {
         pthread_mutex_unlock(&core->buf_mutex);
         return;
     }
@@ -693,7 +698,6 @@ static void in_queue_cb(void *opaque, AudioQueueRef queue,
         len -= n;
         src += n;
     }
-    /* back in the queue, also while stopped, ready for the next start */
     AudioQueueEnqueueBuffer(queue, buf, 0, NULL);
     pthread_mutex_unlock(&core->buf_mutex);
 }
@@ -718,26 +722,79 @@ static void coreaudio_put_buffer_in(HWVoiceIn *hw, void *buf, size_t size)
     pthread_mutex_unlock(&core->buf_mutex);
 }
 
+static void coreaudio_stop_in(CoreaudioVoiceIn *core)
+{
+    if (!core->queue) {
+        return;
+    }
+    pthread_mutex_lock(&core->buf_mutex);
+    core->running = false;
+    pthread_mutex_unlock(&core->buf_mutex);
+    AudioQueueStop(core->queue, true);
+    AudioQueueDispose(core->queue, true);
+    core->queue = NULL;
+
+    pthread_mutex_lock(&core->buf_mutex);
+    core->hw.pos_emul = core->hw.pending_emul = 0;
+    pthread_mutex_unlock(&core->buf_mutex);
+}
+
+static void coreaudio_start_in(CoreaudioVoiceIn *core)
+{
+    AudioQueueBufferRef buf;
+    OSStatus status;
+    UInt32 i;
+
+    if (core->queue) {
+        return;
+    }
+    status = AudioQueueNewInput(&core->desc, in_queue_cb, core, NULL, NULL,
+                                0, &core->queue);
+    if (status != noErr) {
+        coreaudio_recording_logerr(status, "Could not create the input queue");
+        core->queue = NULL;
+        return;
+    }
+    for (i = 0; i < core->buf_count; i++) {
+        status = AudioQueueAllocateBuffer(core->queue,
+                                          core->buf_frames *
+                                          core->hw.info.bytes_per_frame,
+                                          &buf);
+        if (status != noErr) {
+            coreaudio_recording_logerr(status, "Could not allocate a buffer");
+            break;
+        }
+        AudioQueueEnqueueBuffer(core->queue, buf, 0, NULL);
+    }
+    pthread_mutex_lock(&core->buf_mutex);
+    core->running = true;
+    pthread_mutex_unlock(&core->buf_mutex);
+    if (status == noErr) {
+        status = AudioQueueStart(core->queue, NULL);
+        if (status != noErr) {
+            coreaudio_recording_logerr(status, "Could not start recording");
+        }
+    }
+    if (status != noErr) {
+        coreaudio_stop_in(core);
+    }
+}
+
 static int coreaudio_init_in(HWVoiceIn *hw, struct audsettings *as)
 {
     CoreaudioVoiceIn *core = (CoreaudioVoiceIn *)hw;
     Audiodev *dev = hw->s->dev;
     AudiodevCoreaudioPerDirectionOptions *cpdo = dev->u.coreaudio.in;
     struct audsettings obt_as = *as;
-    AudioStreamBasicDescription desc;
-    AudioQueueBufferRef buf;
-    UInt32 frames, count, i;
-    OSStatus status;
 
     obt_as.fmt = AUDIO_FORMAT_F32;
     obt_as.big_endian = HOST_BIG_ENDIAN;
     audio_pcm_init_info(&hw->info, &obt_as);
 
-    frames = audio_buffer_frames(
+    core->buf_frames = audio_buffer_frames(
         qapi_AudiodevCoreaudioPerDirectionOptions_base(cpdo), &obt_as, 11610);
-    count = cpdo->has_buffer_count ? cpdo->buffer_count : 4;
-
-    desc = (AudioStreamBasicDescription) {
+    core->buf_count = cpdo->has_buffer_count ? cpdo->buffer_count : 4;
+    core->desc = (AudioStreamBasicDescription) {
         .mSampleRate = hw->info.freq,
         .mFormatID = kAudioFormatLinearPCM,
         .mFormatFlags = kLinearPCMFormatFlagIsFloat |
@@ -748,32 +805,13 @@ static int coreaudio_init_in(HWVoiceIn *hw, struct audsettings *as)
         .mChannelsPerFrame = hw->info.nchannels,
         .mBitsPerChannel = 32,
     };
-
+    core->queue = NULL;
+    core->running = false;
     pthread_mutex_init(&core->buf_mutex, NULL);
-    core->exit = false;
-    /* room for twice what the queue holds */
-    hw->samples = 2 * count * frames;
-    audio_generic_initialize_buffer_in(hw);
 
-    status = AudioQueueNewInput(&desc, in_queue_cb, core, NULL, NULL, 0,
-                                &core->queue);
-    if (status != noErr) {
-        coreaudio_recording_logerr(status, "Could not create the input queue");
-        pthread_mutex_destroy(&core->buf_mutex);
-        return -1;
-    }
-    for (i = 0; i < count; i++) {
-        status = AudioQueueAllocateBuffer(core->queue,
-                                          frames * hw->info.bytes_per_frame,
-                                          &buf);
-        if (status != noErr) {
-            coreaudio_recording_logerr(status, "Could not allocate a buffer");
-            AudioQueueDispose(core->queue, true);
-            pthread_mutex_destroy(&core->buf_mutex);
-            return -1;
-        }
-        AudioQueueEnqueueBuffer(core->queue, buf, 0, NULL);
-    }
+    /* room for twice what the queue holds */
+    hw->samples = 2 * core->buf_count * core->buf_frames;
+    audio_generic_initialize_buffer_in(hw);
     return 0;
 }
 
@@ -781,29 +819,19 @@ static void coreaudio_fini_in(HWVoiceIn *hw)
 {
     CoreaudioVoiceIn *core = (CoreaudioVoiceIn *)hw;
 
-    pthread_mutex_lock(&core->buf_mutex);
-    core->exit = true;
-    pthread_mutex_unlock(&core->buf_mutex);
-    AudioQueueDispose(core->queue, true);
+    coreaudio_stop_in(core);
     pthread_mutex_destroy(&core->buf_mutex);
 }
 
-/* the queue runs (and the host shows the microphone in use) only when on */
+/* the queue exists (and the host shows the microphone in use) only when on */
 static void coreaudio_enable_in(HWVoiceIn *hw, bool enable)
 {
     CoreaudioVoiceIn *core = (CoreaudioVoiceIn *)hw;
-    OSStatus status;
 
     if (enable) {
-        status = AudioQueueStart(core->queue, NULL);
-        if (status != noErr) {
-            coreaudio_recording_logerr(status, "Could not start recording");
-        }
+        coreaudio_start_in(core);
     } else {
-        AudioQueueStop(core->queue, true);
-        pthread_mutex_lock(&core->buf_mutex);
-        hw->pos_emul = hw->pending_emul = 0;
-        pthread_mutex_unlock(&core->buf_mutex);
+        coreaudio_stop_in(core);
     }
 }
 
