@@ -18,7 +18,10 @@
  *                          reads "any enabled", writing a 1 clears an event
  *   +$200  sndComCtl (16 bits): 6 frame interrupt, 7 input, 8 output,
  *          9-10 rate (24, 32, 48 kHz)
- *   +$204  singerCtl          +$208  singerStatus (read only)
+ *   +$204  singerCtl: 0-3 ?, 4-11 output attenuation, 12-15 and 16-19
+ *          input gain (right, left), 20-21 input (0 microphone, 3 CD),
+ *          22 output mute
+ *   +$208  singerStatus (read only)
  *   +$20C  sndPhase (read only)
  *   +$210  sndInBase          +$214  sndOutBase
  *   +$218  sndSize (16 bits)  +$21C  DSPOVERRUN (8 bits)
@@ -96,6 +99,15 @@
 #define OUT_RING        8192        /* stereo samples */
 #define IN_RING         8192
 #define IN_DELAY_MS     50          /* covers the host's bursts */
+
+#define SINGER_MUTE         0x00400000
+#define SINGER_INPUT_CD     0x00300000
+
+/* input gain in 1.5 dB steps, times 256 */
+static const uint16_t singer_gain[16] = {
+    256, 305, 362, 431, 512, 609, 724, 861,
+    1024, 1218, 1448, 1722, 2048, 2435, 2896, 3444,
+};
 
 static const uint32_t snd_rates[4] = { 24000, 32000, 48000, 48000 };
 
@@ -760,16 +772,25 @@ static void psc_voices_active(MacPSCState *s)
     }
 }
 
+static int16_t psc_gain(int16_t v, unsigned g)
+{
+    return MIN(MAX(v * singer_gain[g] / 256, INT16_MIN), INT16_MAX);
+}
+
 /*
- * A frame of recorded samples. The host delivers them in bursts, so they
- * wait until there are IN_DELAY_MS more than a frame; after a gap, they
- * wait again. Too many (the host's clock ran ahead) are dropped.
+ * A frame of recorded samples, through Singer's input gain. The host
+ * delivers them in bursts, so they wait until there are IN_DELAY_MS more
+ * than a frame; after a gap, they wait again. Too many (the host's clock
+ * ran ahead) are dropped. The CD input has nothing.
  */
 static void psc_record(MacPSCState *s, hwaddr base, uint32_t size)
 {
     uint32_t fill = (s->in_tail - s->in_head + IN_RING) % IN_RING;
     uint32_t target = MIN(size + psc_snd_rate(s) * IN_DELAY_MS / 1000,
                           IN_RING / 3);
+    bool mic = (s->singer_ctl & SINGER_INPUT_CD) != SINGER_INPUT_CD;
+    unsigned gl = extract32(s->singer_ctl, 16, 4);
+    unsigned gr = extract32(s->singer_ctl, 12, 4);
     uint32_t i;
     int16_t l, r;
 
@@ -783,11 +804,14 @@ static void psc_record(MacPSCState *s, hwaddr base, uint32_t size)
         s->in_primed = false;
     }
     for (i = 0; i < size; i++) {
-        if (s->in_primed && s->in_head != s->in_tail) {
-            l = s->in_ring[2 * s->in_head];
-            r = s->in_ring[2 * s->in_head + 1];
+        bool have = s->in_primed && s->in_head != s->in_tail;
+
+        if (have) {
+            l = psc_gain(s->in_ring[2 * s->in_head], gl);
+            r = psc_gain(s->in_ring[2 * s->in_head + 1], gr);
             s->in_head = (s->in_head + 1) % IN_RING;
-        } else {
+        }
+        if (!have || !mic) {
             /* nothing: a little noise, as silence upsets speech recognition */
             l = r = (i * 7 + s->frame_next) % 3 - 1;
         }
@@ -807,7 +831,7 @@ static void psc_frame(void *opaque)
 
     if (s->snd_com & SNDCOM_OUTEN) {
         base = s->snd_out_base + half * size * 4;
-        mute = (s->singer_ctl & 0x00400000) ||
+        mute = (s->singer_ctl & SINGER_MUTE) ||
                (s->dsp_overrun & OVRN_DSPRESET);
         for (i = 0; i < size; i++) {
             next = (s->out_tail + 1) % OUT_RING;
@@ -1209,7 +1233,7 @@ static void psc_reset(DeviceState *dev)
         memset(s->dma_set[c], 0, sizeof(s->dma_set[c]));
     }
     s->snd_com = 0;
-    s->singer_ctl = 0x00400000;     /* muted */
+    s->singer_ctl = SINGER_MUTE;
     s->snd_size = 240;              /* 10 ms at 24 kHz */
     s->dsp_overrun = OVRN_DSPRESET;
     psc_dsp_set_reset(s, true);
