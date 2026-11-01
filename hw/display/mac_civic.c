@@ -322,7 +322,7 @@ static bool civic_update_display(void *opaque)
     unsigned w, h;
     int y, ymin = -1;
     bool on, video;
-    CivicWindow win;
+    CivicWindow win = { 0 };
 
     civic_size(s, &w, &h);
     on = civic_reg(s, R_ENABLE, 1) && rowbytes &&
