@@ -36,6 +36,11 @@ system_ss.add(when: 'CONFIG_MAC_LC_VIDEO', if_true: files('mac_lc_video.c'))
 system_ss.add(when: 'CONFIG_MAC_CIVIC', if_true: files('mac_civic.c', 'saa71xx.c'))
 if avfoundation.found()
   system_ss.add(when: [avfoundation, 'CONFIG_MAC_CIVIC'], if_true: files('hostcam-avf.m'))
+elif host_os == 'windows'
+  mediafoundation = [cc.find_library('mfplat'), cc.find_library('mfreadwrite'),
+                     cc.find_library('mf'), cc.find_library('mfuuid'),
+                     cc.find_library('ole32')]
+  system_ss.add(when: 'CONFIG_MAC_CIVIC', if_true: [files('hostcam-mf.c'), mediafoundation])
 else
   system_ss.add(when: 'CONFIG_MAC_CIVIC', if_true: files('hostcam-stub.c'))
 endif

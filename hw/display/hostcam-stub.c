@@ -10,7 +10,7 @@
 
 HostCam *hostcam_open(const char *name, Error **errp)
 {
-    error_setg(errp, "host cameras are only supported on macOS");
+    error_setg(errp, "host cameras are only supported on macOS and Windows");
     return NULL;
 }
 
