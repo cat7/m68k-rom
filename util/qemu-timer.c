@@ -321,11 +321,91 @@ int qemu_timeout_ns_to_ms(int64_t ns)
 }
 
 
+#if !defined(CONFIG_PPOLL) && defined(CONFIG_DARWIN)
+/*
+ * g_poll() waits in whole milliseconds; select() takes microseconds, so
+ * timers due sooner than a millisecond run on time. -1 if an fd does not
+ * fit an fd_set.
+ */
+static int qemu_poll_select(GPollFD *fds, guint nfds, int64_t timeout)
+{
+    fd_set rfds, wfds, efds;
+    struct timeval tv;
+    int maxfd = -1, n, ready = 0;
+    guint i;
+
+    FD_ZERO(&rfds);
+    FD_ZERO(&wfds);
+    FD_ZERO(&efds);
+    for (i = 0; i < nfds; i++) {
+        int fd = fds[i].fd;
+
+        fds[i].revents = 0;
+        if (fd < 0 || !fds[i].events) {
+            continue;
+        }
+        if (fd >= FD_SETSIZE) {
+            return -2;
+        }
+        if (fds[i].events & G_IO_IN) {
+            FD_SET(fd, &rfds);
+        }
+        if (fds[i].events & G_IO_OUT) {
+            FD_SET(fd, &wfds);
+        }
+        if (fds[i].events & G_IO_PRI) {
+            FD_SET(fd, &efds);
+        }
+        maxfd = MAX(maxfd, fd);
+    }
+
+    tv.tv_sec = MIN(timeout / NANOSECONDS_PER_SECOND, INT32_MAX);
+    tv.tv_usec = DIV_ROUND_UP(timeout % NANOSECONDS_PER_SECOND, SCALE_US);
+    if (tv.tv_usec >= 1000000) {
+        tv.tv_sec++;
+        tv.tv_usec -= 1000000;
+    }
+    n = select(maxfd + 1, &rfds, &wfds, &efds, &tv);
+    if (n <= 0) {
+        return n;
+    }
+    for (i = 0; i < nfds; i++) {
+        int fd = fds[i].fd;
+
+        if (fd < 0 || !fds[i].events) {
+            continue;
+        }
+        if (FD_ISSET(fd, &rfds)) {
+            fds[i].revents |= G_IO_IN;
+        }
+        if (FD_ISSET(fd, &wfds)) {
+            fds[i].revents |= G_IO_OUT;
+        }
+        if (FD_ISSET(fd, &efds)) {
+            fds[i].revents |= G_IO_PRI;
+        }
+        if (fds[i].revents) {
+            ready++;
+        }
+    }
+    return ready;
+}
+#endif
+
 /* qemu implementation of g_poll which uses a nanosecond timeout but is
  * otherwise identical to g_poll
  */
 int qemu_poll_ns(GPollFD *fds, guint nfds, int64_t timeout)
 {
+#if !defined(CONFIG_PPOLL) && defined(CONFIG_DARWIN)
+    if (timeout >= 0) {
+        int ret = qemu_poll_select(fds, nfds, timeout);
+
+        if (ret != -2) {
+            return ret;
+        }
+    }
+#endif
 #ifdef CONFIG_PPOLL
     if (timeout < 0) {
         return ppoll((struct pollfd *)fds, nfds, NULL, NULL);
