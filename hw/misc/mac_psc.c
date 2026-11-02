@@ -96,7 +96,8 @@
 
 #define ENET_RX_SLOT    0x800       /* one received frame per 2 KB */
 
-#define OUT_RING        8192        /* stereo samples */
+#define OUT_RING        32768       /* stereo samples */
+#define OUT_PRIME_MS    200         /* buffered before playing, after a gap */
 #define IN_RING         8192
 #define IN_DELAY_MS     50          /* covers the host's bursts */
 
@@ -608,6 +609,12 @@ static void psc_dsp_set_reset(MacPSCState *s, bool hold)
     timer_mod(s->dsp_timer, s->dsp_last_ns + DSP_SLICE_NS);
 }
 
+void mac_psc_cpu_reset(MacPSCState *s)
+{
+    s->dsp_overrun |= OVRN_DSPRESET;
+    psc_dsp_set_reset(s, true);
+}
+
 /* a sound frame: IR1 to the DSP; an untaken one is an overrun */
 static void psc_dsp_frame(MacPSCState *s)
 {
@@ -677,28 +684,53 @@ static void psc_snd_restart(MacPSCState *s)
     psc_arm_frame(s);
 }
 
+static uint32_t psc_out_fill(MacPSCState *s)
+{
+    return (s->out_tail - s->out_head + OUT_RING) % OUT_RING;
+}
+
+/*
+ * The guest's clock may fall behind the host's for a while: play from a
+ * cushion, and build it up again after running dry. Once the output is
+ * off, what is left plays out, then the voice stops.
+ */
 static void psc_out_cb(void *opaque, int free_b)
 {
     MacPSCState *s = opaque;
     int16_t buf[512];
-    int n, i;
+    uint32_t fill, h;
+    int n, i, done;
+    bool on = s->snd_com & SNDCOM_OUTEN;
 
+    if (!s->out_primed &&
+        (!on || psc_out_fill(s) >= psc_snd_rate(s) * OUT_PRIME_MS / 1000)) {
+        s->out_primed = true;
+    }
     while (free_b >= 4) {
         n = MIN(free_b / 4, ARRAY_SIZE(buf) / 2);
-        for (i = 0; i < n; i++) {
-            if (s->out_head != s->out_tail) {
-                buf[2 * i] = s->out_ring[2 * s->out_head];
-                buf[2 * i + 1] = s->out_ring[2 * s->out_head + 1];
-                s->out_head = (s->out_head + 1) % OUT_RING;
+        fill = s->out_primed ? psc_out_fill(s) : 0;
+        if (!fill && !on) {
+            audio_be_set_active_out(s->audio_be, s->voice, false);
+            return;
+        }
+        for (i = 0, h = s->out_head; i < n; i++) {
+            if (i < fill) {
+                buf[2 * i] = s->out_ring[2 * h];
+                buf[2 * i + 1] = s->out_ring[2 * h + 1];
+                h = (h + 1) % OUT_RING;
             } else {
                 buf[2 * i] = buf[2 * i + 1] = 0;
             }
         }
-        n = audio_be_write(s->audio_be, s->voice, buf, n * 4);
-        if (n <= 0) {
+        done = audio_be_write(s->audio_be, s->voice, buf, n * 4) / 4;
+        if (done <= 0) {
             break;
         }
-        free_b -= n;
+        s->out_head = (s->out_head + MIN(done, fill)) % OUT_RING;
+        if (done > fill) {
+            s->out_primed = false;          /* ran dry */
+        }
+        free_b -= done * 4;
     }
 }
 
@@ -762,9 +794,9 @@ static void psc_open_voice_in(MacPSCState *s)
 /* the host's input runs only while the Mac records */
 static void psc_voices_active(MacPSCState *s)
 {
-    if (s->voice) {
-        audio_be_set_active_out(s->audio_be, s->voice,
-                                !!(s->snd_com & SNDCOM_OUTEN));
+    /* off, it stops once what is left has played */
+    if (s->voice && (s->snd_com & SNDCOM_OUTEN)) {
+        audio_be_set_active_out(s->audio_be, s->voice, true);
     }
     if (s->voice_in) {
         audio_be_set_active_in(s->audio_be, s->voice_in,
@@ -831,8 +863,7 @@ static void psc_frame(void *opaque)
 
     if (s->snd_com & SNDCOM_OUTEN) {
         base = s->snd_out_base + half * size * 4;
-        mute = (s->singer_ctl & SINGER_MUTE) ||
-               (s->dsp_overrun & OVRN_DSPRESET);
+        mute = s->singer_ctl & SINGER_MUTE;
         for (i = 0; i < size; i++) {
             next = (s->out_tail + 1) % OUT_RING;
             if (next == s->out_head) {
@@ -866,9 +897,6 @@ static void psc_snd_com_write(MacPSCState *s, uint16_t val)
         psc_snd_restart(s);
         psc_open_voice(s);
         psc_open_voice_in(s);
-    }
-    if (!(val & SNDCOM_OUTEN)) {
-        s->out_head = s->out_tail = 0;
     }
     if (!(val & SNDCOM_INEN)) {
         s->in_head = s->in_tail = 0;
@@ -1238,6 +1266,7 @@ static void psc_reset(DeviceState *dev)
     s->dsp_overrun = OVRN_DSPRESET;
     psc_dsp_set_reset(s, true);
     s->out_head = s->out_tail = 0;
+    s->out_primed = false;
     s->in_head = s->in_tail = 0;
     s->in_primed = false;
     psc_voices_active(s);

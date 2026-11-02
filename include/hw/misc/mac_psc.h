@@ -108,10 +108,14 @@ struct MacPSCState {
     int64_t frame_next;         /* index of the next frame boundary */
     int16_t *out_ring;          /* stereo samples for the audio backend */
     uint32_t out_head, out_tail;
+    bool out_primed;            /* enough is buffered to play from */
     int16_t *in_ring;           /* stereo samples from the host's input */
     uint32_t in_head, in_tail;
     bool in_primed;             /* enough is buffered to take from */
 };
+
+/* the 68040 RESET instruction: the DSP is held in reset again */
+void mac_psc_cpu_reset(MacPSCState *s);
 
 /* New Age floppy DMA (MacNewAgeDMAFunc): channel 3 */
 uint32_t mac_psc_fdc_dma(void *opaque, uint8_t *buf, uint32_t len,

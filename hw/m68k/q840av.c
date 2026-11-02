@@ -234,7 +234,10 @@ static void q840av_cpu_reset(void *opaque)
     m->cpu.env.pc = ROM_BASE + ldl_be_p(rom + 4);
 }
 
-/* The RESET instruction resets the NuBus cards, and recalibrates VIA1 */
+/*
+ * The RESET instruction resets the NuBus cards and the DSP, and
+ * recalibrates VIA1
+ */
 static void q840av_reset_out(void *opaque, int n, int level)
 {
     Q840AVMachineState *m = opaque;
@@ -246,6 +249,7 @@ static void q840av_reset_out(void *opaque, int n, int level)
         return;
     }
     mac_via1_cpu_reset(&m->via1);
+    mac_psc_cpu_reset(&m->psc);
     QTAILQ_FOREACH(kid, &bus->children, sibling) {
         device_cold_reset(kid->child);
     }
