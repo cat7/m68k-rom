@@ -20,6 +20,7 @@
 #include "qemu/osdep.h"
 #include "qemu/interval-tree.h"
 #include "qemu/qtree.h"
+#include "qemu/bitmap.h"
 #include "exec/cputlb.h"
 #include "exec/log.h"
 #include "exec/page-protection.h"
@@ -191,6 +192,8 @@ struct PageDesc {
     QemuSpin lock;
     /* list of TBs intersecting this ram page */
     uintptr_t first_tb;
+    /* bytes of the page covered by those TBs; NULL until a write needs it */
+    unsigned long *code_bitmap;
 };
 
 void page_table_config_init(void)
@@ -672,6 +675,8 @@ static void tb_remove_all_1(int level, void **lp)
         for (i = 0; i < V_L2_SIZE; ++i) {
             page_lock(&pd[i]);
             pd[i].first_tb = (uintptr_t)NULL;
+            g_free(pd[i].code_bitmap);
+            pd[i].code_bitmap = NULL;
             page_unlock(&pd[i]);
         }
     } else {
@@ -692,6 +697,20 @@ static void tb_remove_all(void)
     }
 }
 
+/* Mark the bytes of page @p that @tb, linked as its page @n, covers */
+static void tb_page_mark(PageDesc *p, TranslationBlock *tb, unsigned int n)
+{
+    tb_page_addr_t start = tb_page_addr0(tb), last = start + tb->size - 1;
+
+    if (n == 0) {
+        last = MIN(last, start | ~TARGET_PAGE_MASK);
+    } else {
+        start = tb_page_addr1(tb);
+        last = start + (last & ~TARGET_PAGE_MASK);
+    }
+    bitmap_set(p->code_bitmap, start & ~TARGET_PAGE_MASK, last - start + 1);
+}
+
 /*
  * Add the tb in the target page and protect it if necessary.
  * Called with @p->lock held.
@@ -705,6 +724,9 @@ static void tb_page_add(PageDesc *p, TranslationBlock *tb, unsigned int n)
     tb->page_next[n] = p->first_tb;
     page_already_protected = p->first_tb != 0;
     p->first_tb = (uintptr_t)tb | n;
+    if (p->code_bitmap) {
+        tb_page_mark(p, tb, n);
+    }
 
     /*
      * If some code is already present, then the pages are already
@@ -737,6 +759,8 @@ static void tb_page_remove(PageDesc *pd, TranslationBlock *tb)
     PageForEachNext n1;
 
     assert_page_locked(pd);
+    g_free(pd->code_bitmap);
+    pd->code_bitmap = NULL;
     pprev = &pd->first_tb;
     PAGE_FOR_EACH_TB(unused, unused, pd, tb1, n1) {
         if (tb1 == tb) {
@@ -1214,7 +1238,29 @@ void tb_invalidate_phys_range_fast(CPUState *cpu, ram_addr_t start,
 
     if (p) {
         ram_addr_t last = start + len - 1;
-        struct page_collection *pages = page_collection_lock(start, last);
+        struct page_collection *pages;
+        TranslationBlock *tb;
+        PageForEachNext n;
+        bool hit;
+
+        /* Most writes to a page holding code miss the code itself */
+        page_lock(p);
+        if (p->first_tb && !p->code_bitmap) {
+            p->code_bitmap = bitmap_new(TARGET_PAGE_SIZE);
+            PAGE_FOR_EACH_TB(unused, unused, p, tb, n) {
+                tb_page_mark(p, tb, n);
+            }
+        }
+        hit = !p->first_tb ||
+              find_next_bit(p->code_bitmap, (last & ~TARGET_PAGE_MASK) + 1,
+                            start & ~TARGET_PAGE_MASK) <=
+              (last & ~TARGET_PAGE_MASK);
+        page_unlock(p);
+        if (!hit) {
+            return;
+        }
+
+        pages = page_collection_lock(start, last);
 
         tb_invalidate_phys_page_range__locked(cpu, pages, p,
                                               start, last, ra);
