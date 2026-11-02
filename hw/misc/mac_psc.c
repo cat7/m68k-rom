@@ -862,7 +862,8 @@ static void psc_frame(void *opaque)
     bool mute;
 
     if (s->snd_com & SNDCOM_OUTEN) {
-        base = s->snd_out_base + half * size * 4;
+        /* the half that has just played: frame n - 1 plays half (n - 1) & 1 */
+        base = s->snd_out_base + (~half & 1) * size * 4;
         mute = s->singer_ctl & SINGER_MUTE;
         for (i = 0; i < size; i++) {
             next = (s->out_tail + 1) % OUT_RING;
