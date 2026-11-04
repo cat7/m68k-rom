@@ -526,23 +526,38 @@ static uint32_t do_begin_page(VirtIOPrint *s, const VirtIOPrintReq *req)
     return VPRINT_OK;
 }
 
+/*
+ * Rows of pixels: a0 of them, a1 bytes apart. Optionally only part of each
+ * row (a3 pixels from a2 across, the rest white) and from a row further
+ * down (a4 - 1; the rows skipped are white).
+ */
 static uint32_t do_band(VirtIOPrint *s, const VirtIOPrintReq *req,
                         VirtQueueElement *elem)
 {
     uint32_t rows = req->a[0], stride = req->a[1], r;
+    uint32_t x = req->a[2], n = req->a[3] ? req->a[3] : s->page_w;
     g_autofree uint8_t *row = NULL;
     size_t off = sizeof(VirtIOPrintReq);
 
     if (!s->in_page) {
         return VPRINT_BAD_STATE;
     }
-    if (stride < s->page_w * 4 || rows > MAX_PIXELS) {
+    if (rows > MAX_PIXELS || x > s->page_w || n > MAX_PIXELS ||
+        stride < (size_t)n * 4) {
         return VPRINT_ERR;
+    }
+    if (req->a[4] && req->a[4] - 1 > s->rows_done &&
+        !page_rows(s, NULL, req->a[4] - 1 - s->rows_done, 0)) {
+        return VPRINT_ERR;
+    }
+    if (n > s->page_w - x) {
+        n = s->page_w - x;
     }
     row = g_malloc((size_t)s->page_w * 4);
     for (r = 0; r < rows; r++, off += stride) {
-        if (iov_to_buf(elem->out_sg, elem->out_num, off, row,
-                       (size_t)s->page_w * 4) != (size_t)s->page_w * 4) {
+        memset(row, 0xff, (size_t)s->page_w * 4);
+        if (iov_to_buf(elem->out_sg, elem->out_num, off, row + (size_t)x * 4,
+                       (size_t)n * 4) != (size_t)n * 4) {
             return VPRINT_ERR;
         }
         if (!page_rows(s, row, 1, 0)) {

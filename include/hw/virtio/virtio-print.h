@@ -25,7 +25,8 @@ enum {
     VPRINT_MEDIA = 1,       /* a0 index -> media name[64] */
     VPRINT_BEGIN_JOB = 2,   /* a0 copies, data title[256] */
     VPRINT_BEGIN_PAGE = 3,  /* a0 width px, a1 height px, a2 w, a3 h (1/100 pt) */
-    VPRINT_BAND = 4,        /* a0 rows, a1 bytes per row, data the rows */
+    VPRINT_BAND = 4,        /* a0 rows, a1 bytes per row, data the rows;
+                               a2 x, a3 pixels (0: all), a4 row + 1 (0: next) */
     VPRINT_END_PAGE = 5,
     VPRINT_END_JOB = 6,     /* -> message[128] */
     VPRINT_ABORT = 7,
