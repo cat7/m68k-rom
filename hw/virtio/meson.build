@@ -54,6 +54,7 @@ if have_vhost
 endif
 system_virtio_ss.add(when: 'CONFIG_VHOST_USER_VSOCK', if_true: files('vhost-user-vsock.c'))
 system_virtio_ss.add(when: 'CONFIG_VIRTIO_RNG', if_true: files('virtio-rng.c'))
+system_virtio_ss.add(when: 'CONFIG_VIRTIO_PRINT', if_true: [files('virtio-print.c'), zlib, cups])
 system_virtio_ss.add(when: 'CONFIG_VIRTIO_RTC', if_true: files('virtio-rtc.c'))
 
 system_virtio_ss.add(when: 'CONFIG_VIRTIO_BALLOON', if_true: files('virtio-balloon.c'))

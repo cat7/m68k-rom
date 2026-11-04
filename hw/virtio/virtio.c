@@ -24,6 +24,7 @@
 #include "qom/object_interfaces.h"
 #include "hw/core/cpu.h"
 #include "hw/virtio/virtio.h"
+#include "hw/virtio/virtio-print.h"
 #include "hw/virtio/vhost.h"
 #include "migration/qemu-file-types.h"
 #include "qemu/atomic.h"
@@ -200,6 +201,7 @@ const char *virtio_device_names[] = {
     [VIRTIO_ID_GPIO] = "virtio-gpio",
     [VIRTIO_ID_SPI] = "virtio-spi",
     [VIRTIO_ID_MEDIA] = "virtio-media",
+    [VIRTIO_ID_PRINT] = "virtio-print",
 };
 
 static const char *virtio_id_to_name(uint16_t device_id)

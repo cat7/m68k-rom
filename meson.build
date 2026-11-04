@@ -2114,6 +2114,11 @@ if not get_option('libusb').auto() or have_system
                       version: '>=1.0.13', method: 'pkg-config')
 endif
 
+cups = not_found
+if have_system
+  cups = dependency('cups', required: false)
+endif
+
 libpmem = not_found
 if not get_option('libpmem').auto() or have_system
   libpmem = dependency('libpmem', required: get_option('libpmem'),
@@ -2510,6 +2515,7 @@ endif
 config_host_data.set('CONFIG_TPM', have_tpm)
 config_host_data.set('CONFIG_TSAN', get_option('tsan'))
 config_host_data.set('CONFIG_USB_LIBUSB', libusb.found())
+config_host_data.set('CONFIG_CUPS', cups.found())
 config_host_data.set('CONFIG_VDE', vde.found())
 config_host_data.set('CONFIG_VHOST', have_vhost)
 config_host_data.set('CONFIG_VHOST_NET', have_vhost_net)
