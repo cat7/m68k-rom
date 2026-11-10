@@ -3,7 +3,8 @@
  *
  * The guest sends each page as rows of 32-bit pixels. They are compressed
  * straight into a PDF, one image per page, which at the end of the job goes
- * to a host printer (through CUPS) or is left in a folder.
+ * to a host printer or is left in a folder. CUPS prints the PDF; on Windows
+ * the page images are drawn on the printer through GDI.
  *
  * SPDX-License-Identifier: GPL-2.0-or-later
  */
@@ -21,6 +22,10 @@
 #include <zlib.h>
 #ifdef CONFIG_CUPS
 #include <cups/cups.h>
+#define HOST_PRINTING
+#elif defined(_WIN32)
+#include <winspool.h>
+#define HOST_PRINTING
 #endif
 
 #define MAX_PIXELS 20000
@@ -40,6 +45,13 @@ typedef struct PrintInfo {
     uint32_t n_media;
     VPrintMedia media[MAX_MEDIA];
 } PrintInfo;
+
+/* Where a page's image is in the PDF */
+typedef struct PageImage {
+    long start, length;
+    uint32_t w, h;              /* pixels */
+    uint32_t media_w, media_h;  /* 1/100 pt */
+} PageImage;
 
 static PrintInfo *info_of(VirtIOPrint *s)
 {
@@ -67,11 +79,13 @@ static char *from_macroman(const char *mr)
     return s ? s : g_strdup(mr);
 }
 
+#ifdef HOST_PRINTING
 /* 1/100 mm to 1/100 pt */
 static uint32_t hmm_to_hpt(int hmm)
 {
     return hmm > 0 ? (uint32_t)((int64_t)hmm * 7200 / 2540) : 0;
 }
+#endif
 
 static void set_media(VPrintMedia *m, const char *name, uint32_t w, uint32_t h,
                       uint32_t margin)
@@ -250,6 +264,196 @@ static void cups_info(PrintInfo *pi, const char *queue)
 }
 #endif
 
+#ifdef _WIN32
+/* 1/10 mm to 1/100 pt */
+static uint32_t tmm_to_hpt(LONG tmm)
+{
+    return hmm_to_hpt(tmm * 10);
+}
+
+static char *from_wide(const wchar_t *w)
+{
+    char *s = g_utf16_to_utf8((const gunichar2 *)w, -1, NULL, NULL, NULL);
+    return s ? s : g_strdup("?");
+}
+
+/* The queue's name, or the default printer's; NULL when there is none */
+static wchar_t *win_printer(const char *queue)
+{
+    DWORD n = 0;
+    wchar_t *w;
+
+    if (queue && *queue) {
+        return (wchar_t *)g_utf8_to_utf16(queue, -1, NULL, NULL, NULL);
+    }
+    GetDefaultPrinterW(NULL, &n);
+    if (!n) {
+        return NULL;
+    }
+    w = g_new0(wchar_t, n);
+    if (!GetDefaultPrinterW(w, &n)) {
+        g_free(w);
+        return NULL;
+    }
+    return w;
+}
+
+/* The printer's own settings, which a job starts from */
+static DEVMODEW *win_devmode(HANDLE h, wchar_t *name)
+{
+    LONG n = DocumentPropertiesW(NULL, h, name, NULL, NULL, 0);
+    DEVMODEW *dm;
+
+    if (n <= 0) {
+        return NULL;
+    }
+    dm = g_malloc0(n);
+    if (DocumentPropertiesW(NULL, h, name, dm, NULL, DM_OUT_BUFFER) != IDOK) {
+        g_free(dm);
+        return NULL;
+    }
+    return dm;
+}
+
+/* What the printer cannot reach, from a DC on its default paper */
+static void win_margins(wchar_t *name, uint32_t margin[4])
+{
+    HDC dc = CreateDCW(L"WINSPOOL", name, NULL, NULL);
+    int dx, dy, ox, oy;
+
+    margin[0] = margin[1] = margin[2] = margin[3] = 1800;
+    if (!dc) {
+        return;
+    }
+    dx = GetDeviceCaps(dc, LOGPIXELSX);
+    dy = GetDeviceCaps(dc, LOGPIXELSY);
+    ox = GetDeviceCaps(dc, PHYSICALOFFSETX);
+    oy = GetDeviceCaps(dc, PHYSICALOFFSETY);
+    if (dx > 0 && dy > 0) {
+        margin[0] = (uint32_t)((int64_t)ox * 7200 / dx);
+        margin[1] = (uint32_t)((int64_t)oy * 7200 / dy);
+        margin[2] = (uint32_t)((int64_t)MAX(0, GetDeviceCaps(dc, PHYSICALWIDTH) -
+                                ox - GetDeviceCaps(dc, HORZRES)) * 7200 / dx);
+        margin[3] = (uint32_t)((int64_t)MAX(0, GetDeviceCaps(dc, PHYSICALHEIGHT) -
+                                oy - GetDeviceCaps(dc, VERTRES)) * 7200 / dy);
+    }
+    DeleteDC(dc);
+}
+
+static void win_info(PrintInfo *pi, const char *queue)
+{
+    g_autofree wchar_t *wname = win_printer(queue);
+    g_autofree PRINTER_INFO_2W *p2 = NULL;
+    g_autofree DEVMODEW *dm = NULL;
+    g_autofree char *name = NULL;
+    HANDLE h = NULL;
+    DWORD need = 0;
+    uint32_t margin[4];
+    int i, n;
+
+    if (!wname || !OpenPrinterW(wname, &h, NULL)) {
+        to_macroman(pi->name, sizeof(pi->name),
+                    queue && *queue ? queue : "No host printer");
+        to_macroman(pi->message, sizeof(pi->message),
+                    "The host has no such printer");
+        pi->state = VPRINT_STOPPED;
+        pi->color = 1;
+        default_media(pi);
+        return;
+    }
+    name = from_wide(wname);
+    to_macroman(pi->name, sizeof(pi->name), name);
+    pi->state = VPRINT_IDLE;
+    pi->message[0] = 0;
+
+    GetPrinterW(h, 2, NULL, 0, &need);
+    if (need) {
+        p2 = g_malloc0(need);
+        if (GetPrinterW(h, 2, (LPBYTE)p2, need, &need)) {
+            DWORD st = p2->Status;
+            const char *why = NULL;
+
+            if (st & PRINTER_STATUS_PAUSED) {
+                why = "The printer is paused";
+            } else if (st & PRINTER_STATUS_OFFLINE) {
+                why = "The printer is offline";
+            } else if (st & PRINTER_STATUS_PAPER_OUT) {
+                why = "The printer is out of paper";
+            } else if (st & PRINTER_STATUS_PAPER_JAM) {
+                why = "The paper is jammed";
+            } else if (st & (PRINTER_STATUS_ERROR | PRINTER_STATUS_NOT_AVAILABLE |
+                             PRINTER_STATUS_USER_INTERVENTION)) {
+                why = "The printer needs attention";
+            }
+            if (why) {
+                pi->state = VPRINT_STOPPED;
+                to_macroman(pi->message, sizeof(pi->message), why);
+            } else if (p2->cJobs || (st & PRINTER_STATUS_PRINTING)) {
+                pi->state = VPRINT_PROCESSING;
+            }
+        }
+    }
+    pi->color = DeviceCapabilitiesW(wname, NULL, DC_COLORDEVICE, NULL,
+                                    NULL) != 0;
+
+    pi->n_media = 0;
+    pi->def = 0;
+    dm = win_devmode(h, wname);
+    win_margins(wname, margin);
+    n = DeviceCapabilitiesW(wname, NULL, DC_PAPERS, NULL, NULL);
+    if (n > 0 && n < 1000) {
+        g_autofree WORD *ids = g_new0(WORD, n);
+        g_autofree POINT *sz = g_new0(POINT, n);
+        g_autofree wchar_t *names = g_new0(wchar_t, (size_t)n * 64 + 1);
+
+        if (DeviceCapabilitiesW(wname, NULL, DC_PAPERS, (LPWSTR)ids,
+                                NULL) == n &&
+            DeviceCapabilitiesW(wname, NULL, DC_PAPERSIZE, (LPWSTR)sz,
+                                NULL) == n &&
+            DeviceCapabilitiesW(wname, NULL, DC_PAPERNAMES, names,
+                                NULL) == n) {
+            for (i = 0; i < n && pi->n_media < MAX_MEDIA; i++) {
+                VPrintMedia *m = &pi->media[pi->n_media];
+                wchar_t nm[65];
+                g_autofree char *u = NULL;
+                uint32_t j;
+                bool dup = false;
+
+                if (sz[i].x <= 0 || sz[i].y <= 0) {
+                    continue;
+                }
+                for (j = 0; j < pi->n_media; j++) {
+                    if (pi->media[j].size[0] == tmm_to_hpt(sz[i].x) &&
+                        pi->media[j].size[1] == tmm_to_hpt(sz[i].y)) {
+                        dup = true;
+                        break;
+                    }
+                }
+                if (dup) {
+                    continue;
+                }
+                memcpy(nm, names + (size_t)i * 64, 64 * sizeof(wchar_t));
+                nm[64] = 0;
+                u = from_wide(nm);
+                to_macroman(m->name, sizeof(m->name), u);
+                m->size[0] = tmm_to_hpt(sz[i].x);
+                m->size[1] = tmm_to_hpt(sz[i].y);
+                memcpy(&m->size[2], margin, sizeof(margin));
+                if (dm && (dm->dmFields & DM_PAPERSIZE) &&
+                    dm->dmPaperSize == ids[i]) {
+                    pi->def = pi->n_media;
+                }
+                pi->n_media++;
+            }
+        }
+    }
+    if (!pi->n_media) {
+        default_media(pi);
+    }
+    ClosePrinter(h);
+}
+#endif
+
 static void *info_thread(void *opaque)
 {
     VirtIOPrint *s = opaque;
@@ -278,6 +482,8 @@ static void *info_thread(void *opaque)
         } else {
 #ifdef CONFIG_CUPS
             cups_info(&fresh, s->printer);
+#elif defined(_WIN32)
+            win_info(&fresh, s->printer);
 #else
             to_macroman(fresh.name, sizeof(fresh.name), "No host printing");
             to_macroman(fresh.message, sizeof(fresh.message),
@@ -378,6 +584,7 @@ static void job_discard(VirtIOPrint *s)
     }
     g_clear_pointer(&s->offsets, g_array_unref);
     g_clear_pointer(&s->pages, g_array_unref);
+    g_clear_pointer(&s->images, g_array_unref);
     g_clear_pointer(&s->title, g_free);
     g_clear_pointer(&s->rowbuf, g_free);
     g_clear_pointer(&s->zbuf, g_free);
@@ -479,6 +686,7 @@ static uint32_t do_begin_job(VirtIOPrint *s, const VirtIOPrintReq *req,
 
     s->offsets = g_array_new(false, false, sizeof(long));
     s->pages = g_array_new(false, false, sizeof(uint32_t));
+    s->images = g_array_new(false, false, sizeof(PageImage));
     g_array_append_val(s->offsets, zero);   /* object 0 */
     pdf_new_obj(s);                         /* 1: catalog */
     pdf_new_obj(s);                         /* 2: page tree */
@@ -587,6 +795,12 @@ static uint32_t do_end_page(VirtIOPrint *s)
     g_clear_pointer(&s->zbuf, g_free);
 
     length = ftell(s->pdf) - s->stream_start;
+    {
+        PageImage im = { s->stream_start, length, s->page_w, s->page_h,
+                         s->media_w, s->media_h };
+
+        g_array_append_val(s->images, im);
+    }
     fputs("\nendstream\nendobj\n", s->pdf);
     len_obj = s->offsets->len - 1;
     pdf_begin_obj(s, len_obj);
@@ -612,6 +826,224 @@ static uint32_t do_end_page(VirtIOPrint *s)
     s->in_page = false;
     return VPRINT_OK;
 }
+
+#ifdef _WIN32
+/* The paper of this size the printer knows, else a custom one */
+static void win_set_paper(DEVMODEW *dm, wchar_t *name, uint32_t w_hpt,
+                          uint32_t h_hpt)
+{
+    bool land = w_hpt > h_hpt;
+    LONG pw = (LONG)((int64_t)(land ? h_hpt : w_hpt) * 254 / 7200);
+    LONG ph = (LONG)((int64_t)(land ? w_hpt : h_hpt) * 254 / 7200);
+    int i, n = DeviceCapabilitiesW(name, NULL, DC_PAPERS, NULL, NULL);
+
+    dm->dmFields |= DM_ORIENTATION | DM_PAPERSIZE;
+    dm->dmOrientation = land ? DMORIENT_LANDSCAPE : DMORIENT_PORTRAIT;
+    if (n > 0 && n < 1000) {
+        g_autofree WORD *ids = g_new0(WORD, n);
+        g_autofree POINT *sz = g_new0(POINT, n);
+
+        if (DeviceCapabilitiesW(name, NULL, DC_PAPERS, (LPWSTR)ids,
+                                NULL) == n &&
+            DeviceCapabilitiesW(name, NULL, DC_PAPERSIZE, (LPWSTR)sz,
+                                NULL) == n) {
+            for (i = 0; i < n; i++) {
+                if (labs(sz[i].x - pw) <= 20 && labs(sz[i].y - ph) <= 20) {
+                    dm->dmPaperSize = ids[i];
+                    dm->dmFields &= ~(DM_PAPERWIDTH | DM_PAPERLENGTH);
+                    return;
+                }
+            }
+        }
+    }
+    dm->dmPaperSize = DMPAPER_USER;
+    dm->dmPaperWidth = pw;
+    dm->dmPaperLength = ph;
+    dm->dmFields |= DM_PAPERWIDTH | DM_PAPERLENGTH;
+}
+
+/* One page image, inflated a strip at a time onto the whole sheet */
+static bool win_draw_page(HDC dc, FILE *f, const PageImage *im)
+{
+    int ox = GetDeviceCaps(dc, PHYSICALOFFSETX);
+    int oy = GetDeviceCaps(dc, PHYSICALOFFSETY);
+    int pw = GetDeviceCaps(dc, PHYSICALWIDTH);
+    int ph = GetDeviceCaps(dc, PHYSICALHEIGHT);
+    size_t src = (size_t)im->w * 3, dst = (src + 3) & ~(size_t)3;
+    uint32_t strip = MAX(1, (4 << 20) / dst), row = 0, r;
+    g_autofree uint8_t *in = g_malloc(65536);
+    g_autofree uint8_t *rgb = g_malloc(src);
+    g_autofree uint8_t *bits = g_malloc0(dst * strip);
+    BITMAPINFO bmi;
+    z_stream zs;
+    long left = im->length;
+    bool ok = true;
+
+    memset(&bmi, 0, sizeof(bmi));
+    bmi.bmiHeader.biSize = sizeof(bmi.bmiHeader);
+    bmi.bmiHeader.biWidth = im->w;
+    bmi.bmiHeader.biPlanes = 1;
+    bmi.bmiHeader.biBitCount = 24;
+    bmi.bmiHeader.biCompression = BI_RGB;
+    memset(&zs, 0, sizeof(zs));
+    if (fseek(f, im->start, SEEK_SET) || inflateInit(&zs) != Z_OK) {
+        return false;
+    }
+    SetStretchBltMode(dc, COLORONCOLOR);
+
+    while (ok && row < im->h) {
+        uint32_t n = MIN(strip, im->h - row);
+        int y0, y1;
+
+        for (r = 0; ok && r < n; r++) {
+            uint8_t *q = bits + (size_t)r * dst;
+            uint32_t x;
+
+            zs.next_out = rgb;
+            zs.avail_out = src;
+            while (zs.avail_out) {
+                int z;
+
+                if (!zs.avail_in) {
+                    size_t got = fread(in, 1, MIN(65536, left), f);
+
+                    if (!got) {
+                        ok = false;
+                        break;
+                    }
+                    left -= got;
+                    zs.next_in = in;
+                    zs.avail_in = got;
+                }
+                z = inflate(&zs, Z_NO_FLUSH);
+                if (z != Z_OK && !(z == Z_STREAM_END && !zs.avail_out)) {
+                    ok = false;
+                    break;
+                }
+            }
+            for (x = 0; x < im->w; x++) {
+                q[x * 3] = rgb[x * 3 + 2];
+                q[x * 3 + 1] = rgb[x * 3 + 1];
+                q[x * 3 + 2] = rgb[x * 3];
+            }
+        }
+        if (!ok) {
+            break;
+        }
+        bmi.bmiHeader.biHeight = -(LONG)n;     /* top-down */
+        y0 = (int)((int64_t)row * ph / im->h);
+        y1 = (int)((int64_t)(row + n) * ph / im->h);
+        r = StretchDIBits(dc, -ox, y0 - oy, pw, y1 - y0, 0, 0, im->w, n,
+                          bits, &bmi, DIB_RGB_COLORS, SRCCOPY);
+        if (r == 0 || r == (uint32_t)GDI_ERROR) {
+            ok = false;
+        }
+        row += n;
+    }
+    inflateEnd(&zs);
+    return ok;
+}
+
+static uint32_t win_print(VirtIOPrint *s, char *message, uint32_t *job)
+{
+    g_autofree wchar_t *wname = win_printer(s->printer);
+    g_autofree wchar_t *wtitle = NULL;
+    g_autofree DEVMODEW *dm = NULL;
+    g_autofree char *name = NULL;
+    const char *err = NULL;
+    HANDLE h = NULL;
+    HDC dc = NULL;
+    FILE *f = NULL;
+    DOCINFOW di;
+    uint32_t reps = 1, rep, i;
+    int id = 0, max_copies;
+    const PageImage *cur = NULL;
+
+    if (!wname || !OpenPrinterW(wname, &h, NULL)) {
+        to_macroman(message, 128, "The host has no such printer");
+        return VPRINT_ERR;
+    }
+    name = from_wide(wname);
+    dm = win_devmode(h, wname);
+    if (!dm) {
+        err = "The printer's settings cannot be read";
+        goto out;
+    }
+    max_copies = DeviceCapabilitiesW(wname, NULL, DC_COPIES, NULL, NULL);
+    dm->dmFields |= DM_COPIES | DM_COLLATE;
+    if (max_copies >= (int)s->copies) {
+        dm->dmCopies = s->copies;
+    } else {
+        dm->dmCopies = 1;
+        reps = s->copies;
+    }
+    dm->dmCollate = DMCOLLATE_TRUE;
+    cur = &g_array_index(s->images, PageImage, 0);
+    win_set_paper(dm, wname, cur->media_w, cur->media_h);
+    DocumentPropertiesW(NULL, h, wname, dm, dm, DM_IN_BUFFER | DM_OUT_BUFFER);
+
+    f = fopen(s->path, "rb");
+    dc = f ? CreateDCW(L"WINSPOOL", wname, NULL, dm) : NULL;
+    if (!dc) {
+        err = f ? "The printer cannot be opened" : "The job cannot be read";
+        goto out;
+    }
+    wtitle = (wchar_t *)g_utf8_to_utf16(s->title && *s->title ? s->title :
+                                        "Untitled", -1, NULL, NULL, NULL);
+    memset(&di, 0, sizeof(di));
+    di.cbSize = sizeof(di);
+    di.lpszDocName = wtitle;
+    id = StartDocW(dc, &di);
+    if (id <= 0) {
+        err = "The printer did not take the job";
+        goto out;
+    }
+    for (rep = 0; rep < reps && !err; rep++) {
+        for (i = 0; i < s->images->len && !err; i++) {
+            const PageImage *im = &g_array_index(s->images, PageImage, i);
+
+            if (im->media_w != cur->media_w || im->media_h != cur->media_h) {
+                win_set_paper(dm, wname, im->media_w, im->media_h);
+                DocumentPropertiesW(NULL, h, wname, dm, dm,
+                                    DM_IN_BUFFER | DM_OUT_BUFFER);
+                ResetDCW(dc, dm);
+                cur = im;
+            }
+            if (StartPage(dc) <= 0 || !win_draw_page(dc, f, im) ||
+                EndPage(dc) <= 0) {
+                err = "The printer stopped taking the job";
+            }
+        }
+    }
+    if (err) {
+        AbortDoc(dc);
+        id = 0;
+    } else if (EndDoc(dc) <= 0) {
+        err = "The printer did not finish the job";
+        id = 0;
+    }
+
+out:
+    if (dc) {
+        DeleteDC(dc);
+    }
+    if (f) {
+        fclose(f);
+    }
+    ClosePrinter(h);
+    if (err) {
+        to_macroman(message, 128, err);
+        return VPRINT_ERR;
+    }
+    {
+        g_autofree char *m = g_strdup_printf("Sent to %s", name);
+
+        to_macroman(message, 128, m);
+    }
+    *job = id;
+    return VPRINT_OK;
+}
+#endif
 
 static uint32_t do_end_job(VirtIOPrint *s, char *message, uint32_t *job)
 {
@@ -693,6 +1125,13 @@ static uint32_t do_end_job(VirtIOPrint *s, char *message, uint32_t *job)
         }
         job_discard(s);         /* CUPS has its own copy of the file */
         return id > 0 ? VPRINT_OK : VPRINT_ERR;
+    }
+#elif defined(_WIN32)
+    {
+        uint32_t r = win_print(s, message, job);
+
+        job_discard(s);
+        return r;
     }
 #else
     to_macroman(message, 128, "This host cannot print; use save-to=");
@@ -833,7 +1272,7 @@ static void virtio_print_realize(DeviceState *dev, Error **errp)
                    s->save_to);
         return;
     }
-#ifndef CONFIG_CUPS
+#ifndef HOST_PRINTING
     if (!s->save_to || !*s->save_to) {
         warn_report("virtio-print: this host cannot print; use save-to=");
     }

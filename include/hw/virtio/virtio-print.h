@@ -85,6 +85,7 @@ struct VirtIOPrint {
     FILE *pdf;
     GArray *offsets;        /* of each PDF object */
     GArray *pages;          /* object numbers of the page objects */
+    GArray *images;         /* where each page's image is */
     uint32_t page_w, page_h;        /* pixels */
     uint32_t media_w, media_h;      /* 1/100 pt */
     uint32_t rows_done;

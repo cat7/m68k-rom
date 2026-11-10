@@ -2118,6 +2118,11 @@ cups = not_found
 if have_system
   cups = dependency('cups', required: false)
 endif
+winspool = not_found
+if have_system and host_os == 'windows'
+  winspool = [cc.find_library('winspool', required: true),
+              cc.find_library('gdi32', required: true)]
+endif
 
 libpmem = not_found
 if not get_option('libpmem').auto() or have_system
