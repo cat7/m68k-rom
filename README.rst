@@ -85,6 +85,13 @@ What the branch adds
   https://github.com/cat7/classicvirtio. The LCs have only their PDS
   slot, so ``mac-pds-ethernet-virtio`` puts the Ethernet card and the
   virtio devices on one card (ROM: classicvirtio's ``declrom-pds``).
+- **Printing:** ``virtio-print-device`` on the same card prints to a
+  printer on the host (CUPS on macOS, the Windows print system on
+  Windows), or saves the pages as PDF files (``save-to=DIR``). The
+  printer is ``printer=NAME``, or the host's default. Its paper sizes,
+  margins and status appear in the Mac's print dialogs. On the Mac side,
+  classicvirtio's "Host Printer" extension is the Chooser driver, and
+  "Host Printer GX" is the driver for QuickDraw GX.
 - **Timing:** at start-up the ROMs time their delay loops against a VIA
   timer, and at full TCG speed the count overflows to 0 (a divide-by-zero
   Sad Mac or system error later). A calibration governor, ported from the
@@ -111,6 +118,18 @@ time themselves at power-on, so always run with
 
 A Mac-style launcher that sets all of this up, and can change floppies
 while a machine runs, is at https://github.com/cat7/Qemu-GUI-m68k.
+
+Downloads
+=========
+
+Builds with the launcher, the declaration ROMs and a readme are at
+https://github.com/cat7/m68k-rom/releases:
+
+- macOS (Apple silicon and Intel):
+  `m68k-2026-11-03 <https://github.com/cat7/m68k-rom/releases/tag/m68k-2026-11-03>`_.
+- Windows 10 and 11 (x64), with printing and a floppy image holding the
+  Mac-side printer drivers:
+  `m68k-2026-11-10 <https://github.com/cat7/m68k-rom/releases/tag/m68k-2026-11-10>`_.
 
 The rest of this file is QEMU's own README.
 
