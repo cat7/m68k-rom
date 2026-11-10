@@ -125,11 +125,9 @@ Downloads
 Builds with the launcher, the declaration ROMs and a readme are at
 https://github.com/cat7/m68k-rom/releases:
 
-- macOS (Apple silicon and Intel):
-  `m68k-2026-11-03 <https://github.com/cat7/m68k-rom/releases/tag/m68k-2026-11-03>`_.
-- Windows 10 and 11 (x64), with printing and a floppy image holding the
-  Mac-side printer drivers:
-  `m68k-2026-11-10 <https://github.com/cat7/m68k-rom/releases/tag/m68k-2026-11-10>`_.
+`m68k-2026-11-10 <https://github.com/cat7/m68k-rom/releases/tag/m68k-2026-11-10>`_
+has macOS (Apple silicon and Intel) and Windows 10 and 11 (x64) builds,
+each with a floppy image holding the Mac-side printer drivers.
 
 The rest of this file is QEMU's own README.
 
